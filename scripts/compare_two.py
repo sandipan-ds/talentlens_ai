@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hireintel_ai.core.config import Settings
+from hireintel_ai.llm.service import LlmService
 
 
 def _load_candidate_profile(role: str, candidate_id_or_file: str) -> Optional[dict]:
@@ -235,7 +236,8 @@ def _generate_llm_explanation(
 ) -> str:
     """Generate an LLM-powered explanation of why A ranked above B.
     
-    This placeholder uses deterministic logic for now. Future: integrate with LLM service.
+    Uses LLM service to generate rich explanations. Falls back to deterministic
+    logic if LLM is not configured or fails.
     """
     score_a_val = score_a.get("final_score", score_a.get("normalized_score", 0.0)) if score_a else 0.0
     score_b_val = score_b.get("final_score", score_b.get("normalized_score", 0.0)) if score_b else 0.0
@@ -247,41 +249,47 @@ def _generate_llm_explanation(
     components_a = score_a.get("components", score_a.get("keyword_components", [])) if score_a else []
     components_b = score_b.get("components", score_b.get("keyword_components", [])) if score_b else []
     
+    # Try LLM explanation
+    llm = LlmService()
     explanation = []
     explanation.append("WHY THIS RANKING?")
     explanation.append("=" * 60)
     explanation.append("")
     
-    if score_a_val > score_b_val:
-        diff = score_a_val - score_b_val
-        explanation.append(f"[SCORE] {info_a['name']} ranked HIGHER by {diff:.1f} points.")
-        explanation.append("")
-        
-        # Matched components comparison
-        a_matched = sum(1 for c in components_a if c.get("matched"))
-        b_matched = sum(1 for c in components_b if c.get("matched"))
-        if a_matched > 0 or b_matched > 0:
-            explanation.append(f"[MATCH] Matched {a_matched} requirements vs {b_matched} for {info_b['name']}.")
-        
-        # Top strengths
-        if components_a:
-            matched_comps = [c for c in components_a if c.get("matched")]
-            if matched_comps:
-                top = matched_comps[0]
-                explanation.append(f"[STRENGTH] Strong in: {top.get('item_name', 'Unknown')}")
-        
-    elif score_b_val > score_a_val:
-        diff = score_b_val - score_a_val
-        explanation.append(f"[SCORE] {info_b['name']} ranked HIGHER by {diff:.1f} points.")
-        explanation.append("")
-        
-        b_matched = sum(1 for c in components_b if c.get("matched"))
-        a_matched = sum(1 for c in components_a if c.get("matched"))
-        if b_matched > 0 or a_matched > 0:
-            explanation.append(f"[MATCH] Matched {b_matched} requirements vs {a_matched} for {info_a['name']}.")
+    if llm.is_configured():
+        explanation.append("[LLM Analysis]")
+        llm_explanation = llm.explain_candidate_score(
+            info_a['name'],
+            info_b['name'],
+            score_a_val,
+            score_b_val,
+            components_a,
+            components_b,
+        )
+        explanation.append(llm_explanation)
     else:
-        explanation.append(f"[SCORE] Both candidates scored EQUALLY at {score_a_val:.1f} points.")
-        explanation.append("Consider other factors like cultural fit, growth potential, or recent experience.")
+        # Fallback to deterministic explanation
+        explanation.append("[Deterministic Analysis - LLM not configured]")
+        if score_a_val > score_b_val:
+            diff = score_a_val - score_b_val
+            explanation.append(f"{info_a['name']} ranked HIGHER by {diff:.1f} points.")
+            
+            a_matched = sum(1 for c in components_a if c.get("matched"))
+            b_matched = sum(1 for c in components_b if c.get("matched"))
+            if a_matched > 0 or b_matched > 0:
+                explanation.append(f"Matched {a_matched} requirements vs {b_matched} for {info_b['name']}.")
+        
+        elif score_b_val > score_a_val:
+            diff = score_b_val - score_a_val
+            explanation.append(f"{info_b['name']} ranked HIGHER by {diff:.1f} points.")
+            
+            b_matched = sum(1 for c in components_b if c.get("matched"))
+            a_matched = sum(1 for c in components_a if c.get("matched"))
+            if b_matched > 0 or a_matched > 0:
+                explanation.append(f"Matched {b_matched} requirements vs {a_matched} for {info_a['name']}.")
+        else:
+            explanation.append(f"Both candidates scored EQUALLY at {score_a_val:.1f} points.")
+            explanation.append("Consider other factors like cultural fit, growth potential, or recent experience.")
     
     explanation.append("")
     explanation.append("RECRUITER NOTE:")

@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     raw_data_dir: Path = Path("data/raw")
     processed_data_dir: Path = Path("data/processed")
     qdrant_url: str = "http://localhost:6333"
+    
+    # LLM configuration
+    openrouter_api_key: str = ""
+    base_url: str = "https://openrouter.ai/api/v1"
+    model: str = "minimax/minimax-m3"
 
     @property
     def resolved_raw_data_dir(self) -> Path:
