@@ -1,8 +1,37 @@
-"""Evaluate candidate profiles against weighted requirements."""
+"""Backward-compatible re-export of the keyword scorer.
 
-from typing import Dict, Any
+The deterministic keyword-based scoring engine was renamed to
+:mod:`src.scoring.keyword_scorer`. This module is kept so any code that
+imports from ``src.scoring.evaluate`` continues to work.
+"""
+
+from .keyword_scorer import (  # noqa: F401
+    CandidateScore,
+    ScoreComponent,
+    _find_evidence_chunk,
+    _has_bachelor,
+    _keyword_match,
+    _profile_text,
+    _total_years_experience,
+    compute_scale_factor,
+    evaluate_batch,
+    evaluate_candidate,
+    evaluate_role,
+    load_profiles_for_role,
+    load_weight_config,
+    rank_candidates,
+    score_item,
+)
 
 
-def evaluate_candidate(profile: Dict[str, Any], weights: Dict[str, Any]) -> Dict[str, Any]:
-    """Evaluate a candidate using configured weights."""
-    return {}
+__all__ = [
+    "CandidateScore",
+    "ScoreComponent",
+    "compute_scale_factor",
+    "evaluate_batch",
+    "evaluate_candidate",
+    "evaluate_role",
+    "load_profiles_for_role",
+    "load_weight_config",
+    "rank_candidates",
+]

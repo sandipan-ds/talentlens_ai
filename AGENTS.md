@@ -32,6 +32,10 @@ docs/
 ├── RECRUITER_WORKFLOWS.md
 ├── IMPLEMENTATION_ROADMAP.md
 ├── RELEASE_NOTES.md
+├── DECISIONS.md
+├── ARCHITECTURE_CHANGELOG.md
+├── TROUBLESHOOTING.md
+├── ENVIRONMENT_NOTES.md
 ________________________________________
 Document Responsibilities
 
@@ -290,9 +294,9 @@ Avoid large rewrites.
 ________________________________________
 Architecture Compliance
 Implementation must follow:
-1.	PRODUCT_REQUIREMENTS.md
-2.	HLD.md
-3.	SYSTEM_ARCHITECTURE.md
+1.	PROJECT_OVERVIEW.md
+2.	SYSTEM_ARCHITECTURE.md
+3.	AI_ARCHITECTURE.md
 If implementation requires deviation:
 •	Document the reason.
 •	Update architecture documents first.

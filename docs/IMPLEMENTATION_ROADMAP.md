@@ -11,6 +11,12 @@ This roadmap defines the step-by-step execution plan for HireIntel AI, aligned w
    - Treat `/docs` as source of truth.
 2. Establish documentation process
    - Keep `PROJECT_OVERVIEW.md`, `SYSTEM_ARCHITECTURE.md`, `AI_ARCHITECTURE.md`, `AI_DESIGN_RATIONALE.md`, `MODEL_REGISTRY.md`, `PROMPT_LIBRARY.md`, `EVALUATION.md`, `RECRUITER_WORKFLOWS.md`, and `RELEASE_NOTES.md` synchronized with implementation.
+3. Establish production code foundation
+   - Use `src/hireintel_ai/` as the production package.
+   - Keep application entry points under `src/hireintel_ai/app/`.
+   - Keep shared configuration under `src/hireintel_ai/core/`.
+   - Keep shared typed contracts under `src/hireintel_ai/schemas/`.
+   - Keep tests under `tests/unit/`, `tests/integration/`, and `tests/fixtures/`.
 
 ---
 
@@ -39,27 +45,42 @@ This roadmap defines the step-by-step execution plan for HireIntel AI, aligned w
 
 ---
 
-## Phase 3: Resume Parsing
+## Phase 3: Resume Parsing ✅ Shipped 2026-06-19
 1. Build resume ingestion and normalization
-   - Support formats in `data/original`.
-   - Use parsing + OCR if needed.
+   - Support formats in `data/original`. ✅ (PDF + TXT)
+   - Use parsing + OCR if needed. ✅ (`pdfplumber` → `pypdfium2` OCR → `pdf2image` fallback)
 2. Extract structured candidate profiles
-   - Name, contact, education, skills, certifications, languages, experience, projects, technologies, leadership indicators.
+   - Name, contact, education, skills, certifications, languages, experience, projects, technologies, leadership indicators. ✅
 3. Capture evidence
-   - Link each extracted field to source resume text for explainability.
+   - Link each extracted field to source resume text for explainability. ✅ (`raw_text` + `sections[].start/end` char spans; `candidate_id` SHA1 of source path)
+
+**Artifacts:**
+- 721 profile JSONs in `data/processed/<role>/`.
+- `src/resume_parsing/{parser, ocr, batch_parse}.py`.
+- `tests/unit/test_resume_parser.py` — passing.
 
 ---
 
-## Phase 4: Candidate Evaluation Engine
+## Phase 4: Candidate Evaluation Engine ✅ Shipped 2026-06-19
 1. Implement deterministic scoring
-   - Use recruiter weights + structured profiles.
+   - Use recruiter weights + structured profiles. ✅ (`keyword_scorer.py`)
 2. Produce evidence-backed scoring
-   - Score value
-   - Supporting evidence
-   - Resume source snippets
+   - Score value ✅
+   - Supporting evidence ✅ (chunk_id, snippet, source_file)
+   - Resume source snippets ✅
 3. Avoid black-box ranking
-   - LLMs support extraction/summarization only.
-   - Final scores must be auditable and reproducible.
+   - LLMs support extraction/summarization only. ✅ (LLM not in scoring loop)
+   - Final scores must be auditable and reproducible. ✅
+
+**Three independent scoring strategies shipped:**
+
+| Strategy | Output folder | Purpose |
+|---|---|---|
+| Keyword | `data/scores/keyword/` | Hard requirements, audit-first |
+| Semantic | `data/scores/semantic/` | Synonyms + paraphrases (cosine vs candidate's chunks) |
+| Hybrid | `data/scores/hybrid/` | Default — `α × keyword + (1-α) × semantic`, α = 0.5 |
+
+**Comparison view:** `scripts/compare_scores.py --role <Role> --top 10` shows rank deltas across strategies.
 
 ---
 
@@ -120,11 +141,11 @@ This roadmap defines the step-by-step execution plan for HireIntel AI, aligned w
 
 ## Recommended execution order
 1. Define documentation and architecture
-2. Build JD extraction
-3. Build weight configuration
-4. Build resume parsing
-5. Build scoring engine
-6. Build ranking/comparison
-7. Add RAG/chat
-8. Evaluate and refine
-9. Deploy and document
+2. Establish production package structure, configuration, schemas, and test layout
+3. Build JD extraction
+4. Build weight configuration
+5. Build resume parsing
+6. Build scoring engine
+7. Build ranking/comparison
+8. Add retrieval, then grounded RAG/chat
+9. Evaluate, harden, deploy, and document

@@ -1,1 +1,3 @@
-# HireIntel AI\n\nProject scaffold for the TalentLens AI candidate intelligence platform.
+# HireIntel AI
+
+Explainable candidate intelligence platform for recruiter-controlled screening and ranking.
