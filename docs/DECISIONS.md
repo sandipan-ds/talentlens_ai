@@ -19,8 +19,10 @@ Every major architecture or AI change must be documented here before implementat
 | DEC-005 | 2026-06-19 | Use BGE-M3 as the proposed primary embedding model. | Superseded | `AI_DESIGN_RATIONALE.md`, `MODEL_REGISTRY.md` |
 | DEC-006 | 2026-06-19 | Use an in-memory numpy vector index until scale demands a hosted vector DB. | Accepted | `MODEL_REGISTRY.md`, `AI_ARCHITECTURE.md` |
 | DEC-007 | 2026-06-19 | Use `sentence-transformers/all-MiniLM-L6-v2` as the active embedding model (CPU-runnable, no API key, PII-safe). | Accepted | `AI_DESIGN_RATIONALE.md`, `MODEL_REGISTRY.md` |
-| DEC-008 | 2026-06-19 | Ship three independent scoring strategies (keyword, semantic, hybrid) runnable side by side; default production strategy is hybrid with `α = 0.5`. | Accepted | `AI_ARCHITECTURE.md`, `AI_DESIGN_RATIONALE.md`, `MODEL_REGISTRY.md` |
+| DEC-008 | 2026-06-19 | Ship three independent scoring strategies (keyword, semantic, hybrid) runnable side by side; default production strategy is hybrid with `α = 0.5`. | Superseded | `AI_ARCHITECTURE.md`, `AI_DESIGN_RATIONALE.md`, `MODEL_REGISTRY.md` |
 | DEC-009 | 2026-06-19 | Use `pypdfium2` (no Poppler required) as the primary OCR fallback renderer for image-only PDFs. | Accepted | `AI_ARCHITECTURE.md`, `MODEL_REGISTRY.md` |
+| DEC-010 | 2026-06-19 | Ship a **single canonical deterministic scorer** (`src/scoring/graded_scorer.py`) in two modes (code-only + rubric-bound LLM evidence scoring); retire the keyword / semantic / hybrid triad. Code-only: per-item `min(importance, candidate_years / expected_years × importance)` with partial credit. Rubric-bound LLM: scores against recruiter-defined rubric, weight application in code. | Accepted | `WORKING_LOGIC.md`, `AI_DESIGN_RATIONALE.md`, `AI_ARCHITECTURE.md`, `MODEL_REGISTRY.md` |
+| DEC-011 | 2026-06-19 | Make `WORKING_LOGIC.md` the canonical scoring/evaluation spec; all other docs defer to it for scoring details. | Accepted | `WORKING_LOGIC.md`, `CURRENT_PROGRESS.md`, all docs |
 
 ---
 
@@ -94,30 +96,79 @@ Related Documents:
 ## DEC-008: Three scoring strategies (keyword, semantic, hybrid) with `α = 0.5` default
 
 **Date:** 2026-06-19
-**Status:** Accepted
+**Status:** Superseded by DEC-010
 
 **Context:** Keyword-only scoring is fast and auditable but misses synonyms. LLM-direct ranking is prohibited by `AGENTS.md`. We needed a way to add synonym awareness without giving up explainability or reproducibility.
 
-**Decision:** Ship three independent scorers, each writing to its own output folder:
+**Decision (original):** Ship three independent scorers, each writing to its own output folder:
 - `keyword_scorer.py` — deterministic binary match against recruiter weights.
 - `semantic_scorer.py` — JD-bullet cosine vs candidate's chunks (mean × 100).
 - `hybrid_scorer.py` — `α × keyword + (1-α) × semantic`, default `α = 0.5`.
 
-Recruiters select the strategy per role. `scripts/compare_scores.py` shows rank deltas across strategies.
-
-**Alternatives Considered:**
-- Single keyword scorer (insufficient synonym coverage).
-- Single semantic scorer (less explainable, recruiter loses direct weight control).
-- LLM-direct ranking (rejected by `AGENTS.md`).
-- Per-JD α (more complex; deferred to future iteration).
-
-**Consequences:**
-- Same JSON shape across all three strategies → single UI renderer.
-- Each score component still links to `chunk_id` + `source_file` for evidence.
-- Recruiters get three ranking signals per role and can compare them directly.
-- Storage: 3 ranked JSONs per role (~50 KB each); negligible.
+**Superseded by DEC-010:** the canonical scorer (`graded_scorer.py`) replaces
+the triad. The legacy modules were removed 2026-06-19; the CLI accepts the
+legacy strategy names only as deprecated aliases.
 
 **Related Documents:** `AI_ARCHITECTURE.md`, `AI_DESIGN_RATIONALE.md`, `MODEL_REGISTRY.md`
+
+---
+
+## DEC-010: Single canonical deterministic scorer (`graded_scorer.py`)
+
+**Date:** 2026-06-19
+**Status:** Accepted
+
+**Context:** `WORKING_LOGIC.md` is explicit: *"you don't need so many different scoring or ranking systems, just one is enough."* The legacy keyword / semantic / hybrid triad produced three non-comparable numbers and made recruiter interpretation harder, not easier. We also needed years-proportional scoring (a candidate with 1 year of Power BI should not score the same as one with 6 years), which the binary keyword scorer couldn't express.
+
+**Decision:** Ship one deterministic scorer (`src/scoring/graded_scorer.py`) that operates in **two modes** per `WORKING_LOGIC.md` ("Fundamental Rule"):
+
+1. **Code-only scoring** — for fully measurable requirements (total experience, skill presence + years, degree match, certification match, institute/cert tier lookups). Uses synonym dictionary + structured profile search + regex years detection. Per-item raw score = `min(importance, candidate_years / expected_years × importance)`, with `importance × 0.3` partial credit for mention-only matches. No LLM involved.
+
+2. **Rubric-bound LLM evidence scoring** — for requirements requiring judgment (skill depth, relevant/same-role/leadership experience, project complexity, domain expertise). The LLM receives the full content of the mapped section(s) via Section-Routed Evidence Retrieval (exact label match, not similarity-ranked) and scores against a recruiter-defined rubric. The LLM does not see the weight and never computes the final weighted contribution.
+
+In both modes:
+- Weight application and final aggregation are computed in code, never by the LLM.
+- Total normalized to 0–100 via `scale_factor = 100 / max_score` from the recruiter config.
+- Per-item evidence is recorded: matched section, exact snippet, years detected, recruiter-readable reason.
+- Rubric sub-scores and cited evidence are cached at scoring time for fast, consistent score explanations.
+
+The legacy `keyword_scorer.py`, `semantic_scorer.py`, `hybrid_scorer.py` modules were removed. The CLI accepts `--strategy keyword|semantic|hybrid` only as a deprecated alias that prints a `DeprecationWarning` and forwards to `graded`.
+
+**Alternatives Considered:**
+- Keep the triad (rejected — spec says one scorer is enough).
+- LLM-direct ranking (rejected by `AGENTS.md`).
+- ML-trained ranker (deferred — see `AI_DESIGN_RATIONALE.md` §5 future upgrade path).
+- Code-only scoring for everything (rejected — skill depth, relevant experience, and project complexity require genuine judgment that synonym+regex cannot provide).
+
+**Consequences:**
+- One canonical ranking signal per role; cross-role comparisons are direct.
+- Per-item evidence is auditable from the candidate's own words.
+- Years-proportional scoring rewards demonstrated depth, not just keyword presence.
+- Summary-years fallback only applies to experience-style items, so credentials (BE/BTech, CBAP) aren't contaminated by total tenure.
+- Rubric-bound LLM mode ensures judgment-based scoring is anchored to recruiter-defined rubrics, not LLM opinions.
+
+**Related Documents:** `WORKING_LOGIC.md`, `AI_DESIGN_RATIONALE.md`, `AI_ARCHITECTURE.md`, `MODEL_REGISTRY.md`, `ARCHITECTURE_CHANGELOG.md`
+
+---
+
+## DEC-011: `WORKING_LOGIC.md` is the canonical scoring/evaluation spec
+
+**Date:** 2026-06-19
+**Status:** Accepted
+
+**Context:** `PROJECT_OVERVIEW.md` and `WORKING_LOGIC.md` both describe scoring, but they drifted apart — `PROJECT_OVERVIEW.md` still referenced the legacy triad while `WORKING_LOGIC.md` was the source of truth for the single-scorer design. Recruiters and contributors reading the docs got conflicting answers.
+
+**Decision:** `WORKING_LOGIC.md` is the canonical spec for scoring, evaluation, and ranking. All other docs (`PROJECT_OVERVIEW.md`, `SYSTEM_ARCHITECTURE.md`, `AI_ARCHITECTURE.md`, `RECRUITER_WORKFLOWS.md`, `EVALUATION.md`, etc.) defer to it for scoring details and link to it at the top. `CURRENT_PROGRESS.md` is the status snapshot ("what's done vs planned") mapped to every step of `WORKING_LOGIC.md`.
+
+**Alternatives Considered:**
+- Promote `PROJECT_OVERVIEW.md` to canonical (rejected — `WORKING_LOGIC.md` is more detailed and more recent).
+- Merge both into a single doc (rejected — `WORKING_LOGIC.md` is the spec; `PROJECT_OVERVIEW.md` is the high-level product overview).
+
+**Consequences:**
+- One source of truth for scoring rules; no more drift.
+- `CURRENT_PROGRESS.md` becomes the single status doc, replacing ad-hoc status notes scattered across the other docs.
+
+**Related Documents:** `WORKING_LOGIC.md`, `CURRENT_PROGRESS.md`, all docs
 
 ---
 

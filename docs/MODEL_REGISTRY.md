@@ -12,21 +12,26 @@ All model changes must be documented here before implementation, and significant
 
 | Component | Current Selection | Status | Purpose |
 | --- | --- | --- | --- |
-| Primary LLM | GPT-4 | Proposed | Resume parsing support, JD extraction support, summaries, comparisons, explanations |
-| Fallback LLM | Claude 3 | Proposed | Long-context fallback for large resumes and document-heavy comparison tasks |
+| Active LLM | OpenRouter `minimax/minimax-m3` | **Active** | Resume chat, score explanation, candidate comparison, rubric-bound evidence scoring (`src/hireintel_ai/llm/service.py`) |
+| Primary LLM (production upgrade) | GPT-4 | Proposed | Resume parsing support, JD extraction support, summaries, comparisons, explanations |
+| Fallback LLM (production upgrade) | Claude 3 | Proposed | Long-context fallback for large resumes and document-heavy comparison tasks |
 | Private / Local LLM | Llama 3 | Proposed | Privacy-first deployment option where candidate data cannot leave controlled infrastructure |
 | **Embedding Model** | **`sentence-transformers/all-MiniLM-L6-v2`** | **Active** | **Chunk and JD-bullet embeddings; 384-dim, CPU-runnable, ~80 MB, no API key** |
 | Alternative Embedding Model | BGE-M3 | Future | Multilingual upgrade path; CPU-runnable but larger |
 | Cloud Embedding Option | OpenAI `text-embedding-3-small` | Future | Highest quality but per-token API cost; data egress concern |
-| Reranker | None yet | Future | Optional cross-encoder reranker for top-K precision boost |
+| Reranker | None yet | Future | Optional cross-encoder reranker for top-K precision boost (pool-level search only) |
 | **Chunking Strategy** | **Document-Aware (section-based, one chunk per experience/education/project)** | **Active** | **Preserves resume structure; supports sub-split at 1200 chars with 120 char overlap** |
+| **Header Normalization** | **Synonym lookup table + fallback classification (7 canonical sections)** | **Active** | **Maps heterogeneous resume headers to canonical section labels at parse time** |
 | **Vector Storage** | **In-memory numpy (`data/embeddings/index.npz`)** | **Active** | **4k chunks × 384 dims ≈ 6 MB; trivial to load; switchable to Qdrant without API changes** |
 | Planned Vector Database | Qdrant | Future | When scale exceeds single-machine memory or we need hosted multi-user |
-| **Retrieval Strategy** | **Dense cosine over in-memory index, candidate-scoped or global** | **Active** | **Used by both JD matching (global) and semantic scoring (candidate-scoped)** |
-| **Keyword Scoring Strategy** | **Deterministic keyword + heuristic, per-item binary match, normalize to 100** | **Active** | **Recruiter-controlled weights; fully auditable** |
-| **Semantic Scoring Strategy** | **JD-bullet → candidate's chunks cosine; mean similarity × 100** | **Active** | **Handles synonyms; deterministic given model + chunks** |
-| **Hybrid Scoring Strategy** | **`final = α × keyword + (1 − α) × semantic`, default α = 0.5** | **Active** | **Default production strategy; preserves both per-component breakdowns** |
-| **Candidate Ranking Strategy** | **Sort by selected strategy's score; ties broken by matched-component count, then keyword score** | **Active** | **LLM never determines final ranking** |
+| **Per-Candidate Evidence Retrieval** | **Section-Routed (exact label match on canonical sections, no embeddings)** | **Active** | **Fetches full mapped section content per requirement for rubric-bound LLM scoring** |
+| **Cross-Candidate Pool Retrieval** | **Dense cosine over in-memory index** | **Active** | **Used by JD matching (triage) and resume chat (RAG); never used for per-candidate scoring** |
+| **Keyword Scoring Strategy** | **Deprecated — see `graded_scorer`** | **Legacy** | **Superseded by the single deterministic scorer below** |
+| **Semantic Scoring Strategy** | **Deprecated — see `graded_scorer`** | **Legacy** | **Superseded by the single deterministic scorer below** |
+| **Hybrid Scoring Strategy** | **Deprecated — see `graded_scorer`** | **Legacy** | **Superseded by the single deterministic scorer below** |
+| **Code-Only Scoring** | **`src/scoring/graded_scorer.py`: per-item `min(importance, candidate_years / expected_years × importance)`, normalized to 0-100** | **Active** | **Scores total experience, skill presence/years, degree match, cert match — no LLM** |
+| **Rubric-Bound LLM Evidence Scoring** | **LLM judge scores against recruiter-defined rubric; weight application in code** | **Planned** | **Scores skill depth, relevant/same-role/leadership experience, project complexity; LLM never sees weight or computes aggregation** |
+| **Candidate Ranking Strategy** | **Sort by the deterministic scorer's normalized total; ties broken by per-item matched count** | **Active** | **LLM never determines final ranking** |
 
 ---
 
@@ -45,25 +50,13 @@ All model changes must be documented here before implementation, and significant
 
 | Parameter | Value | Source |
 | --- | --- | --- |
-| Default hybrid α | 0.5 | `src/scoring/hybrid_scorer.blend` |
-| Keyword per-item rule | binary match (full importance or 0) | per `data/Job descriptions/<role>/<role>_ScoringGuide.md` |
-| Years-of-experience parser | merges overlapping spans, uses `Present` → current year (2026 anchor) | `src/scoring/keyword_scorer._total_years_experience` |
-| Bachelor's detector | matches "bachelor", "bs", "bba", etc. in education entries | `src/scoring/keyword_scorer._has_bachelor` |
-| Semantic similarity threshold (match) | 0.30 cosine | `src/rag/jd_match.match_requirements_to_candidates` |
-| Output folders | `data/scores/{keyword,semantic,hybrid}/<role>_ranked.json` | `src/scoring/batch_score.SCORES_ROOT` |
-
----
-
-## Scoring Configuration
-
-Candidate scoring must be generated by deterministic formulas using:
-
-- recruiter-defined scoring policies
-- structured candidate profiles
-- evidence-linked extracted fields
-- documented objective and subjective metric weights
-
-The LLM must not directly produce final candidate rankings.
+| Default expected years (when config omits) | 10 | `src/scoring/graded_scorer.DEFAULT_EXPECTED_YEARS` |
+| Per-item score rule | `min(importance, candidate_years / expected_years × importance)` | `src/scoring/graded_scorer.evaluate_candidate` |
+| Partial credit (mentioned, no years) | `importance × 0.3` | `src/scoring/graded_scorer.evaluate_candidate` |
+| Total normalization | `total_raw × (100 / max_score)` from the weight config's `scale_factor` | `src/scoring/graded_scorer.evaluate_candidate` |
+| Section priority | experience.entries → skills → education.entries → certifications → projects → summary | `src/scoring/graded_scorer._search_profile` |
+| Summary-years fallback | only for items in non-Education / non-Certification categories | `src/scoring/graded_scorer._is_experience_item` |
+| Synonym dictionary | `src/scoring/graded_scorer._SYNONYMS` (curated, with regex word boundaries) | `src/scoring/graded_scorer._aliases_for` |
 
 ---
 

@@ -1,7 +1,10 @@
 # Implementation Roadmap
 
 ## Overview
-This roadmap defines the step-by-step execution plan for HireIntel AI, aligned with `AGENTS.md` and `docs/PROJECT_OVERVIEW.md`.
+This roadmap defines the step-by-step execution plan for HireIntel AI, aligned
+with `AGENTS.md`, `docs/PROJECT_OVERVIEW.md`, and the canonical scoring spec
+[`docs/WORKING_LOGIC.md`](WORKING_LOGIC.md). For "what is implemented today vs
+what's planned", see [`docs/CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md).
 
 ---
 
@@ -62,25 +65,58 @@ This roadmap defines the step-by-step execution plan for HireIntel AI, aligned w
 ---
 
 ## Phase 4: Candidate Evaluation Engine ✅ Shipped 2026-06-19
+
+Per `WORKING_LOGIC.md` "Fundamental Rule": the platform ships **one**
+deterministic scorer. The legacy keyword / semantic / hybrid triad was retired
+the same day.
+
 1. Implement deterministic scoring
-   - Use recruiter weights + structured profiles. ✅ (`keyword_scorer.py`)
+   - Use recruiter weights + `expected_years` + structured profiles. ✅ (`graded_scorer.py`)
 2. Produce evidence-backed scoring
    - Score value ✅
-   - Supporting evidence ✅ (chunk_id, snippet, source_file)
+   - Supporting evidence ✅ (matched section, snippet, years detected)
    - Resume source snippets ✅
 3. Avoid black-box ranking
-   - LLMs support extraction/summarization only. ✅ (LLM not in scoring loop)
+   - LLMs support explanation only — never scoring. ✅
    - Final scores must be auditable and reproducible. ✅
 
-**Three independent scoring strategies shipped:**
+**Single canonical scorer ships:**
 
-| Strategy | Output folder | Purpose |
+| File | Output folder | Purpose |
 |---|---|---|
-| Keyword | `data/scores/keyword/` | Hard requirements, audit-first |
-| Semantic | `data/scores/semantic/` | Synonyms + paraphrases (cosine vs candidate's chunks) |
-| Hybrid | `data/scores/hybrid/` | Default — `α × keyword + (1-α) × semantic`, α = 0.5 |
+| `src/scoring/graded_scorer.py` | `data/scores/graded/` | Single deterministic ranking signal per `WORKING_LOGIC.md` |
 
-**Comparison view:** `scripts/compare_scores.py --role <Role> --top 10` shows rank deltas across strategies.
+**Legacy triad (`keyword` / `semantic` / `hybrid`) retired 2026-06-19.** Passing
+the legacy strategy names to `batch_score` / `compare_two` prints a
+deprecation warning and forwards to `graded`.
+
+**Batch CLI:** `python -m src.scoring.batch_score --role <Role>` → `data/scores/graded/<Role>_ranked.json` (ranked, 0-100 normalized, per-item evidence included).
+**Per-candidate report:** `python scripts/evaluate_one.py --candidate <id> --role <Role>`.
+**Comparison view:** `python scripts/compare_scores.py --role <Role> --top 10` shows the canonical graded ranking + per-candidate strengths and gaps.
+
+---
+
+## Phase 4.5: Clarification Loop + Quality Tiers ⬜ Planned
+
+Closes the largest gaps in `WORKING_LOGIC.md` between shipped code and the
+canonical spec.
+
+1. **JD clarification loop** (Green / Yellow / Red)
+   - Auto-classify each extracted requirement.
+   - Auto-generate follow-up questions for Yellow items.
+   - Hard-block the scoring policy until all items are Green.
+   - Persist `clarifications.json` next to the role's weight config.
+2. **Per-item `expected_years` in the recruiter UI**
+   - Surface as a per-item field next to `importance`.
+   - Validate that every Green item has either an explicit or default value.
+3. **Quality-based evaluation**
+   - Tier dictionary for institutions (IIT / NIT / Tier-1 Private / Regional).
+   - Tier dictionary for certification providers (AWS / Microsoft / Google / Unknown).
+   - `graded_scorer` consumes the tiers when computing education / certification scores.
+4. **Resume cleaning pipeline**
+   - Dedicated step between "raw text" and "structured profile" that strips headers, footers, template noise, decorative elements, and duplicate content.
+5. **Candidate Intelligence Report artifact**
+   - Aggregate `graded_scorer` per-item evidence into a single `data/processed/<role>/<id>_intelligence_report.json` with sections for Skills, Experience, Education, Certifications, Projects, Objective Scores, and Evidence Sources.
 
 ---
 
@@ -111,16 +147,22 @@ Why A ranked above B:   [SCORE] BUSINESS ANALYST RESUME ranked HIGHER by 21.3 po
 
 ---
 
-## Phase 6: Resume Chat / RAG
+## Phase 6: Resume Chat / RAG 🟡 Mostly built, CLI pending
 1. Implement chunking strategy
-   - Document-aware chunking by section.
-   - Optional semantic chunking for large sections.
+   - Document-aware chunking by section. ✅ (`src/rag/chunker.py`)
 2. Build embedding and retrieval pipeline
-   - Select embedding model and vector store.
-   - Document decisions in `AI_DESIGN_RATIONALE.md` and `MODEL_REGISTRY.md`.
-3. Ensure grounded conversational answers
-   - Cite retrieved resume content.
-   - If missing, respond with: “Information not found in candidate documents.”
+   - Embedding model: `sentence-transformers/all-MiniLM-L6-v2` ✅
+   - Vector store: in-memory numpy (`data/embeddings/index.npz`) ✅
+   - Cosine retrieval: ✅
+   - Documented in `AI_DESIGN_RATIONALE.md` and `MODEL_REGISTRY.md`. ✅
+3. Build recruiter-facing chat CLI
+   - `scripts/resume_chat.py --candidate <id> --question "..." --role <Role>` — CLI. ⬜
+   - Streamlit chat UI. ⬜
+4. Ensure grounded conversational answers
+   - LLM service via OpenRouter (`src/hireintel_ai/llm/service.py`) ✅
+   - Strict-grounding prompt (see `docs/PROMPT_LIBRARY.md` RESUME-CHAT-001). ✅
+   - "Information not found in candidate documents." fallback. ✅
+   - Cite retrieved resume content. 🟡 (citation pattern in code; recruiter UI not yet built)
 
 ---
 
@@ -155,10 +197,11 @@ Why A ranked above B:   [SCORE] BUSINESS ANALYST RESUME ranked HIGHER by 21.3 po
 ## Recommended execution order
 1. Define documentation and architecture
 2. Establish production package structure, configuration, schemas, and test layout
-3. Build JD extraction
-4. Build weight configuration
-5. Build resume parsing
-6. Build scoring engine
+3. Build JD extraction + clarification loop
+4. Build weight configuration (weights + expected_years)
+5. Build resume parsing + cleaning
+6. Build scoring engine (single canonical scorer)
 7. Build ranking/comparison
-8. Add retrieval, then grounded RAG/chat
-9. Evaluate, harden, deploy, and document
+8. **Phase 4.5: clarification loop, per-item expected_years UI, quality tiers, Candidate Intelligence Report**
+9. Add retrieval, then grounded RAG/chat (Phase 6)
+10. Evaluate, harden, deploy, and document (Phases 7 + 8)

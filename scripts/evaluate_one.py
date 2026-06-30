@@ -1,4 +1,8 @@
-"""Evaluate a single candidate and produce the per-item report format from PROJECT_OVERVIEW.md.
+"""Evaluate a single candidate and produce the per-item report from PROJECT_OVERVIEW.md.
+
+This script is the canonical example for Phase 4 candidate evaluation.
+It uses the single deterministic scorer in ``src/scoring/graded_scorer.py``
+and prints the report in the exact format from docs/PROJECT_OVERVIEW.md.
 
 Usage:
     python scripts/evaluate_one.py --candidate <id_or_file_stem> --role <role>
@@ -11,17 +15,18 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hireintel_ai.core.config import Settings
 from scoring.graded_scorer import (
+    DEFAULT_EXPECTED_YEARS,
     evaluate_candidate,
-    render_evaluation_report,
     load_weights,
+    render_report,
 )
 
 
@@ -64,7 +69,7 @@ def load_profile(role: str, candidate_id_or_file: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate a single candidate using the per-item graded scorer."
+        description="Evaluate a single candidate using the deterministic scorer."
     )
     parser.add_argument(
         "--candidate",
@@ -79,23 +84,28 @@ def main():
     parser.add_argument(
         "--out",
         default=None,
-        help="Optional output JSON path.",
+        help="Optional output JSON path for the full evaluation dict.",
+    )
+    parser.add_argument(
+        "--default-years",
+        type=int,
+        default=DEFAULT_EXPECTED_YEARS,
+        help="Default expected years when an item has none (Step 5 of WORKING_LOGIC.md).",
     )
 
     args = parser.parse_args()
 
     profile = load_profile(args.role, args.candidate)
     weights = load_weights(args.role)
-    evaluation = evaluate_candidate(profile, weights)
+    evaluation = evaluate_candidate(profile, weights, default_expected_years=args.default_years)
 
-    report = render_evaluation_report(evaluation)
-    print(report)
+    print(render_report(evaluation))
 
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(evaluation, f, indent=2, ensure_ascii=False)
+            json.dump(evaluation.to_dict(), f, indent=2, ensure_ascii=False)
         print(f"\nDetailed evaluation saved to: {out_path}")
 
 

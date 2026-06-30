@@ -10,7 +10,7 @@ This document records the AI design decisions made in the HireIntel AI platform.
 
 ### Decision
 **Primary:** Document-Aware Chunking  
-**Secondary:** Semantic Chunking within large sections
+**Long-section handling:** Deterministic metadata filtering (`skills_asserted contains "Python"`) — not semantic chunking
 
 ### Alternatives Considered
 - **Recursive Chunking:** Fixed-size overlapping chunks regardless of document structure
@@ -34,8 +34,8 @@ This document records the AI design decisions made in the HireIntel AI platform.
 - Avoids the high cost and latency of agentic or fully semantic approaches
 
 ### Future Upgrade Path
-- Integrate semantic chunking within very large sections (e.g., resumes with 10+ years of experience)
-- Evaluate hybrid approaches as embedding models improve
+- Header Normalization (synonym lookup + fallback classification) maps heterogeneous resume headers to canonical section labels at parse time — see `AI_ARCHITECTURE.md` §9a.
+- Evaluate hybrid approaches as embedding models improve (for cross-candidate pool search only, not per-candidate evidence retrieval).
 
 ---
 
@@ -64,10 +64,11 @@ This document records the AI design decisions made in the HireIntel AI platform.
 | OpenAI | Very High | $$$ per 1M tokens | Low | Yes | No | No |
 
 ### Final Rationale
-- The semantic scorer runs **per-candidate, per-JD-bullet**, so the embedding model is the hot path: latency and cost matter
+- The embedding model is on the hot path for cross-candidate pool search (JD ↔ resume triage) and resume chat (RAG) — latency and cost matter
 - MiniLM-L6-v2 runs entirely on CPU and offline (no API key, no egress) — critical because resumes contain PII
 - Quality on short English business text is well-validated (top of MTEB leaderboard for its size class)
 - 384-dim vectors keep the in-memory index small (~6 MB for 4k chunks) — no external vector DB needed for the current scale
+- Per-candidate evidence retrieval uses Section-Routed Evidence Retrieval (exact label match), not embeddings — so the embedding model is not on the scoring hot path
 
 ### Future Upgrade Path
 - **BGE-M3** when we onboard multilingual candidates or non-English JDs
@@ -111,8 +112,9 @@ This document records the AI design decisions made in the HireIntel AI platform.
 ## 4. Large Language Model (LLM)
 
 ### Decision
-**Primary:** GPT-4 (OpenAI)  
-**Fallback:** Claude (Anthropic)  
+**Active:** OpenRouter `minimax/minimax-m3` — used for resume chat, score explanation, candidate comparison, and rubric-bound evidence scoring
+**Proposed (production upgrade):** GPT-4 (OpenAI)  
+**Proped fallback:** Claude (Anthropic)  
 **Local/Private:** Llama 3 (Meta)
 
 ### Alternatives Considered
@@ -131,10 +133,12 @@ This document records the AI design decisions made in the HireIntel AI platform.
 | Llama 3 | Strong | 128K | Low | High | Yes |
 
 ### Final Rationale
-- GPT-4 offers the most consistent and robust performance across parsing, summarization, and comparison tasks
-- Claude 3 serves as a fallback for long-document processing (very long resumes)
+- `minimax/minimax-m3` via OpenRouter is the current active LLM — provides reasonable quality at low cost for resume chat, score explanations, and candidate comparisons without requiring direct API relationships with multiple providers
+- GPT-4 is the proposed production upgrade for the most consistent and robust performance across parsing, summarization, comparison, and rubric-bound evidence scoring tasks
+- Claude 3 is the proposed fallback for long-document processing (very long resumes)
 - Llama 3 available for private or fully self-hosted deployments where data cannot leave the environment
 - Using a deterministic scoring engine reduces direct dependency on LLM reasoning for rankings, mitigating cost concerns
+- The LLM is restricted to extraction, summarization, comparison, rubric-bound evidence scoring, and chat — never final ranking
 
 ### Future Upgrade Path
 - Evaluate GPT-5, Claude 4, or other next-generation models as they release
@@ -142,52 +146,58 @@ This document records the AI design decisions made in the HireIntel AI platform.
 
 ---
 
-## 5. Candidate Scoring Strategies
+## 5. Candidate Scoring Strategy
 
 ### Decision
-Ship **three independent scoring strategies**, runnable side by side, defaulting to the hybrid blend:
+Ship **one deterministic, evidence-backed scorer** (`src/scoring/graded_scorer.py`) that satisfies `docs/WORKING_LOGIC.md` end to end. The legacy `keyword_scorer`, `semantic_scorer`, and `hybrid_scorer` modules are deprecated; the spec explicitly states *"you don't need so many different scoring or ranking systems, just one is enough."*
 
-| Strategy | File | Output folder | Use case |
-|---|---|---|---|
-| **Keyword** | `src/scoring/keyword_scorer.py` | `data/scores/keyword/` | Hard requirements, compliance, audit-first |
-| **Semantic** | `src/scoring/semantic_scorer.py` | `data/scores/semantic/` | Synonym-heavy roles, soft-skill matches |
-| **Hybrid** | `src/scoring/hybrid_scorer.py` | `data/scores/hybrid/` | Default; balances both |
+The **LLM never determines final rankings** — it is restricted to extraction, summarization, comparison, and chat. Scoring is purely deterministic given the same profile + weight config.
 
-The **LLM never determines final rankings** — it is restricted to extraction, summarization, comparison, and chat. All three scorers are deterministic given the same model + chunks.
+### How It Works
+
+For every recruiter-defined item in `data/Job descriptions/<role>/<role>_WeightConfig_filled.json`:
+
+1. Resolve the item's synonyms from a curated dictionary (e.g. `Power BI → powerbi, pbi, dax`).
+2. Search the **structured** profile in priority order: `experience.entries[*].details` → `skills` → `education.entries` → `certifications` → `projects` → `summary`. Raw-text regex is not used.
+3. Detect years of experience near the matched alias (`X year(s)` / `X+ yr(s)`). For experience-style items (Core Skills, Technology & Tools, Experience), fall back to the summary's "X+ years of experience as …" line.
+4. Compute the per-item raw score on the recruiter's 0-10 scale:
+   * No evidence → `0`
+   * Mentioned but no years measured → `importance * 0.3`
+   * Years measured → `min(importance, candidate_years / expected_years × importance)`
+5. Normalize the per-item score using the config's `normalized_importance` (so the candidate's total is on a 0-100 scale per `WORKING_LOGIC.md` Step 6) and aggregate.
+
+Every item is **explainable**: the report lists the matched profile section, the exact snippet that earned the score, the years detected, and a recruiter-readable reason.
 
 ### Alternatives Considered
 
 | Approach | Explainability | Reproducibility | Cost | Synonym handling | Bias risk |
 |----------|---------------|-----------------|------|-------------------|-----------|
+| Single deterministic scorer (chosen) | High (per-item evidence) | High | Low | Good (synonym dict) | Low |
 | Keyword only | High | High | Low | Poor | Low |
-| Semantic (cosine) only | Medium (numeric) | High (same model) | Low | Good | Low |
+| Semantic (cosine) only | Medium (numeric) | High | Low | Good | Low |
 | LLM-direct ranking | Low | Low | High | Excellent | High |
 | Hybrid (α-blend) | High (both lenses) | High | Low | Good | Low |
 | ML-trained ranker | Medium | Medium | Medium | Good (depends on training) | Medium |
 
 ### Final Rationale
-- **Three strategies = three independent ranking signals.** Recruiters can pick the strategy per role, and `scripts/compare_scores.py` shows rank deltas so they can see which candidates are robustly good vs. strategy-dependent
-- The **hybrid default (`α = 0.5`)** gives recruiters the best of both: keyword catches hard requirements, semantic catches synonyms and paraphrases
-- All strategies are **explainable per-component** — each score component links to a `chunk_id` + `source_file` so recruiters can click through to the original PDF
-- Keyword is the cheapest and most auditable; semantic handles the "did the candidate really do this?" case keyword misses; hybrid is the safe production default
-
-### Aggregation Rules
-
-- **Keyword:** `raw / max_possible * 100`. Per-item binary match (full importance or 0). Special cases (years of experience, bachelor's detection) handled in `keyword_scorer._total_years_experience` and `_has_bachelor`.
-- **Semantic:** `mean(max_cosine(bullet_i, candidate.chunks) for all i) * 100`. Bullets are equally weighted.
-- **Hybrid:** `α * keyword_score + (1 - α) * semantic_score`. Per-component breakdowns preserved from both strategies.
+- **One scorer → one canonical ranking signal.** Recruiters no longer have to interpret three different numbers; the 0-100 total is directly comparable across roles (`scale_factor = 100 / max_score`).
+- **Per-item reasoning is grounded in the structured profile**, so every score is auditable from the candidate's own words. This satisfies the "no black-box scoring" rule in `AGENTS.md`.
+- **Years-proportional scoring** matches the recruiter's mental model ("7 of 10 years = 7/10") and rewards demonstrated depth, not just keyword presence.
+- **Summary-years fallback** only applies to experience-style items, so credential-only items (BE/BTech, CBAP) are not contaminated by total-tenure numbers.
 
 ### Future Upgrade Path
-- Per-JD α configuration (recruiters tune blend weight per role)
-- ML-trained reranker on top of cosine (cross-encoder for top-50 → top-5 precision)
-- Confidence intervals on scores when using probabilistic features
+- Recruiter-configurable per-item `expected_years` (currently uses `DEFAULT_EXPECTED_YEARS = 10`)
+- Quality-based scoring for institutions and certification providers (Tier 1 / Tier 2 / Tier 3 institutions; vendor reputation)
+- ML-trained reranker **on top of** the deterministic score for the shortlist (cross-encoder for top-50 → top-5 precision) — never as a replacement
 
 ---
 
 ## 6. Retrieval Strategy
 
 ### Decision
-**Hybrid Search:** Sparse (BM25) + Dense (Vector) + Reranker
+**Per-candidate evidence retrieval (for scoring):** Section-Routed Evidence Retrieval — exact label match on canonical sections, no embeddings, no cosine. Full section content is sent to the rubric-bound LLM judge.
+
+**Cross-candidate pool search + resume chat:** Dense Cosine over in-memory vector index. Hybrid search (Sparse BM25 + Dense + Reranker) is a **future upgrade path for pool-level search only** — never for per-candidate scoring.
 
 ### Alternatives Considered
 - **Sparse-Only (Keyword):** Fast, exact match, poor with synonyms
@@ -205,10 +215,11 @@ The **LLM never determines final rankings** — it is restricted to extraction, 
 | Hybrid + Reranker | Excellent | Excellent | Medium | High |
 
 ### Final Rationale
-- Recruiters use both exact terms ("Python") and semantic concepts ("backend experience")
-- Hybrid search satisfies both needs without sacrificing speed
-- Reranking step significantly improves precision for RAG-based answers
-- Supported natively by Qdrant, simplifying implementation
+- **Section-Routed Evidence Retrieval** is the correct tool for per-candidate scoring: a single resume is a short document (1,000–3,000 tokens) that should be read, not searched. Exact label match on canonical sections guarantees no relevant chunk is silently missed and the same requirement always returns the same content.
+- **Dense cosine** is the correct tool for cross-candidate pool search and resume chat, where the corpus is large and open-ended.
+- Hybrid search (BM25 + Dense + Reranker) is a future upgrade for pool-level search only — it adds synonym awareness and semantic understanding for triage without sacrificing speed.
+- Reranking would significantly improve precision for RAG-based answers and pool triage.
+- Per-candidate scoring must never use similarity ranking — this is a hard rule in `WORKING_LOGIC.md`.
 
 ### Future Upgrade Path
 - Evaluate ColBERT-style late interaction models for reranking

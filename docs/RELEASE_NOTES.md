@@ -10,19 +10,34 @@ This document tracks notable changes to HireIntel AI, including features, fixes,
 
 ### Added
 - **Phase 5: Candidate Ranking & Comparison** — `scripts/compare_two.py` generates recruiter-friendly side-by-side candidate comparisons.
-  - Loads two candidate profiles and hybrid scores.
-  - Displays component breakdown (matched requirements count, top strengths).
-  - Generates deterministic "Why A ranked above B" narrative.
+  - Loads two candidate profiles and the canonical graded scores.
+  - Displays component breakdown (matched items, top strengths, biggest gaps).
+  - Generates deterministic "Why A ranked above B" narrative; LLM narration is optional.
   - Evidence-backed explanations with no LLM black-box ranking.
   - 6 integration tests passing; handles invalid candidates gracefully.
+- **Phase 4: Canonical Scorer (`src/scoring/graded_scorer.py`)** — single deterministic, evidence-backed scorer that implements `docs/WORKING_LOGIC.md` end to end.
+  - Per-item `min(importance, candidate_years / expected_years × importance)` with 0.3 partial credit for mention-only matches.
+  - Searches the **structured** profile (experience → skills → education → certifications → projects → summary), not raw-text regex.
+  - Summary-years fallback only for experience-style categories, so credentials (BE/BTech, CBAP) aren't contaminated by total tenure.
+  - Per-item output includes matched section, exact snippet, years detected, and recruiter-readable reason.
+  - CLI: `python scripts/evaluate_one.py --candidate <id> --role <role>` prints the report in the format shown in `docs/PROJECT_OVERVIEW.md` Phase 4.
+  - 23 unit tests passing; 46/46 total tests green.
+- **`docs/CURRENT_PROGRESS.md`** — single status doc mapping every step of `WORKING_LOGIC.md` to ✅ / 🟡 / ⬜.
+- **`docs/WORKING_LOGIC.md` is now the canonical scoring/evaluation spec** (DEC-011). All other docs defer to it for scoring details.
 
 ### Changed
+- **Doc alignment sweep 2026-06-19 (PM)** — `PROJECT_OVERVIEW.md`, `SYSTEM_ARCHITECTURE.md`, `AI_ARCHITECTURE.md`, `RECRUITER_WORKFLOWS.md`, `EVALUATION.md`, `PROMPT_LIBRARY.md`, `IMPLEMENTATION_ROADMAP.md`, `DECISIONS.md` all updated to defer to `WORKING_LOGIC.md` and reflect the single canonical scorer. Added Phase 4.5 (clarification loop + quality tiers) to the roadmap.
+- `AI_DESIGN_RATIONALE.md` §5 rewritten to describe the single-scorer design (the old keyword/semantic/hybrid triad is deprecated per the spec: *"you don't need so many different scoring or ranking systems, just one is enough."*).
+- `MODEL_REGISTRY.md` updated to mark the legacy scorers as deprecated and to register the new `graded_scorer` configuration (expected years, partial credit, section priority, summary-years heuristic).
+- `tests/integration/test_candidate_comparison.py` now uses `sys.executable` for its subprocess, so the test inherits the venv's site-packages regardless of system Python on PATH.
+- **Phase 4 cleanup 2026-06-19 (PM)** — removed legacy `keyword_scorer.py`, `semantic_scorer.py`, `hybrid_scorer.py`, plus the `evidence.py` / `evaluate.py` shims and their tests. Renamed the canonical output to `data/scores/graded/`. Updated `batch_score`, `compare_scores`, `compare_two`, and `demo_scoring` to read from the graded output. Legacy `--strategy` names print a `DeprecationWarning` and forward to `graded`. Test suite is 46/46 green.
 - Documentation requirements now align with the current source-of-truth documents in `docs/`.
 - Implementation roadmap now includes a foundation code structure phase before feature work.
 - Standardized product-facing naming on `HireIntel AI`.
 
 ### Fixed
 - Removed `docs/` from `.gitignore` so documentation can be tracked as required by `AGENTS.md`.
+- Over-broad aliases (e.g. ``\bbe\b``) no longer false-positive in unrelated text thanks to word-boundary regex wrapping in `graded_scorer._aliases_for`.
 
 ### Breaking Changes
 - None.

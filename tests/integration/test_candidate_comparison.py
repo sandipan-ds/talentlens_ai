@@ -2,28 +2,36 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 
 
+# Use the same Python interpreter that's running pytest so the
+# subprocess inherits the venv's site-packages (pydantic-settings,
+# sentence-transformers, etc.). Hard-coding "python" would launch
+# whichever python is first on PATH, which may not have the deps.
+PYTHON = sys.executable
+
+
 class TestCandidateComparison:
     """Test candidate comparison functionality."""
-    
+
     def test_compare_two_script_exists(self):
         """Test that the compare_two.py script exists."""
         script = Path("scripts/compare_two.py")
         assert script.exists(), "compare_two.py script not found"
-    
+
     def test_compare_two_with_valid_candidates(self):
         """Test comparing two valid candidates."""
         result = subprocess.run(
             [
-                "python",
+                PYTHON,
                 "scripts/compare_two.py",
                 "--candidate-a", "8c5959c7993cb7a1",
                 "--candidate-b", "01888170110d1ccf",
                 "--role", "BusinessAnalyst",
-                "--strategy", "hybrid",
+                "--strategy", "graded",
             ],
             capture_output=True,
             text=True,
@@ -31,18 +39,18 @@ class TestCandidateComparison:
         )
         assert result.returncode == 0, f"Script failed: {result.stderr}"
         output = result.stdout
-        
-        # Check that output contains expected sections
+
+        # Check that output contains expected sections (graded scoring).
         assert "CANDIDATE COMPARISON" in output
-        assert "Hybrid Score" in output
+        assert "Graded Score" in output
         assert "WHY THIS RANKING?" in output
         assert "RECRUITER NOTE" in output
-    
+
     def test_compare_two_with_hybrid_strategy(self):
-        """Test that hybrid strategy works correctly."""
+        """Test that the legacy 'hybrid' alias still works (forwards to graded)."""
         result = subprocess.run(
             [
-                "python",
+                PYTHON,
                 "scripts/compare_two.py",
                 "--candidate-a", "8c5959c7993cb7a1",
                 "--candidate-b", "01888170110d1ccf",
@@ -54,16 +62,17 @@ class TestCandidateComparison:
             timeout=30,
         )
         assert result.returncode == 0
-        output = result.stdout
-        
-        # Check for score numbers
-        assert "58.39" in output or "final_score" in output.lower()
-    
+        output = result.stdout + result.stderr
+
+        # Deprecated alias should still produce a comparison report.
+        assert "CANDIDATE COMPARISON" in output
+        assert "Graded Score" in output
+
     def test_compare_two_with_keyword_strategy(self):
         """Test that keyword strategy works."""
         result = subprocess.run(
             [
-                "python",
+                PYTHON,
                 "scripts/compare_two.py",
                 "--candidate-a", "8c5959c7993cb7a1",
                 "--candidate-b", "01888170110d1ccf",
@@ -77,12 +86,12 @@ class TestCandidateComparison:
         # May or may not have scores depending on keyword file existence
         # But should at least run without crashing
         assert isinstance(result.returncode, int)
-    
+
     def test_compare_two_invalid_candidate_a(self):
         """Test with invalid candidate A."""
         result = subprocess.run(
             [
-                "python",
+                PYTHON,
                 "scripts/compare_two.py",
                 "--candidate-a", "nonexistent_xyz_123",
                 "--candidate-b", "01888170110d1ccf",
@@ -94,12 +103,12 @@ class TestCandidateComparison:
         )
         output = result.stdout + result.stderr
         assert "Could not find" in output or "Could not load" in output
-    
+
     def test_compare_two_invalid_role(self):
         """Test with invalid role."""
         result = subprocess.run(
             [
-                "python",
+                PYTHON,
                 "scripts/compare_two.py",
                 "--candidate-a", "8c5959c7993cb7a1",
                 "--candidate-b", "01888170110d1ccf",

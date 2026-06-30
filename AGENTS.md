@@ -22,6 +22,8 @@ ________________________________________
 Documentation Structure
 The following documents must be maintained throughout the project lifecycle.
 docs/
+├── WORKING_LOGIC.md          ← canonical scoring/evaluation spec (DEC-011)
+├── CURRENT_PROGRESS.md       ← status snapshot mapped to every WORKING_LOGIC step
 ├── PROJECT_OVERVIEW.md
 ├── SYSTEM_ARCHITECTURE.md
 ├── AI_ARCHITECTURE.md
@@ -36,8 +38,62 @@ docs/
 ├── ARCHITECTURE_CHANGELOG.md
 ├── TROUBLESHOOTING.md
 ├── ENVIRONMENT_NOTES.md
+|── STYLE_GUIDE.md
+
+All docs defer to `WORKING_LOGIC.md` for scoring, evaluation, and ranking
+details. `CURRENT_PROGRESS.md` is the single status doc ("what's done vs
+what's planned") mapped to every step of `WORKING_LOGIC.md`.
 ________________________________________
 Document Responsibilities
+
+WORKING_LOGIC.md
+
+Contains:
+
+• The canonical scoring, evaluation, and ranking contract.
+• JD validation & clarification (Green / Yellow / Red).
+• Recruiter weight configuration (weights + expected_years).
+• Resume processing pipeline.
+• Candidate Intelligence Report structure.
+• Deterministic scoring engine rules.
+• Quality-based evaluation (institution tiers, provider reputation).
+• Resume matching as a supporting signal.
+• Explainable scoring + RAG-based explanations.
+• Resume chat, candidate comparison, hiring recommendations.
+
+This document is the source of truth for "what the system should do" with
+respect to scoring and evaluation. All other docs defer to it.
+
+---
+
+### Style Guide Compliance
+
+All code generation and refactoring must comply with:
+
+docs/STYLE_GUIDE.md
+
+The style guide defines:
+- Code structure
+- Performance principles
+- Python and Pandas conventions
+- Refactoring standards
+- Senior engineering practices
+
+The style guide takes precedence over default LLM coding patterns.
+
+---
+
+CURRENT_PROGRESS.md
+
+Contains:
+
+• A status snapshot mapping every step of `WORKING_LOGIC.md` to ✅ / 🟡 / ⬜.
+• The recommended next unit of work.
+• How this doc relates to the other docs.
+
+This document is the source of truth for "what the system does today".
+
+---
 
 PROJECT_OVERVIEW.md
 
@@ -46,14 +102,15 @@ Contains:
 • Product vision
 • Problem statement
 • Business objectives
-• End-to-end workflow
+• End-to-end workflow (with the clarification loop)
 • Key differentiators
 • Core features
 • Candidate evaluation philosophy
 • AI design principles
 • Technology overview
 
-This document explains what the system does and why it exists.
+This document explains what the system does and why it exists. It defers to
+`WORKING_LOGIC.md` for scoring details.
 
 ---
 
@@ -294,9 +351,11 @@ Avoid large rewrites.
 ________________________________________
 Architecture Compliance
 Implementation must follow:
-1.	PROJECT_OVERVIEW.md
-2.	SYSTEM_ARCHITECTURE.md
-3.	AI_ARCHITECTURE.md
+1.	WORKING_LOGIC.md (canonical scoring/evaluation spec — DEC-011)
+2.	PROJECT_OVERVIEW.md
+3.	SYSTEM_ARCHITECTURE.md
+4.	AI_ARCHITECTURE.md
+5.	CURRENT_PROGRESS.md (status snapshot — must be updated when implementation changes)
 If implementation requires deviation:
 •	Document the reason.
 •	Update architecture documents first.

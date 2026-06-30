@@ -62,3 +62,35 @@ Each entry should include problem description, symptoms, root cause, investigati
 **Prevention Strategy:**
 - Keep `docs/` tracked.
 - Do not add source-of-truth documentation folders to `.gitignore`.
+
+---
+
+### Legacy scorer imports after Phase 4 cleanup
+
+**Date:** 2026-06-19 (PM)
+
+**Problem:** After retiring the legacy `keyword / semantic / hybrid` triad, any code that still imported from `src.scoring.keyword_scorer`, `src.scoring.semantic_scorer`, `src.scoring.hybrid_scorer`, `src.scoring.evidence`, or `src.scoring.evaluate` would fail with `ModuleNotFoundError`.
+
+**Symptoms:**
+- `ModuleNotFoundError: No module named 'src.scoring.keyword_scorer'` (or similar).
+- `ImportError: cannot import name 'CandidateScore' from 'src.scoring.evaluate'`.
+
+**Root Cause:**
+- The legacy modules were removed as part of the Phase 4 cleanup (DEC-010). The canonical scorer is `src/scoring/graded_scorer.py`.
+
+**Investigation Process:**
+- Ran `grep_search` for `from src.scoring.(keyword|semantic|hybrid|evidence|evaluate)` across the source tree.
+- Found 0 matches — all consumers had been migrated.
+
+**Solution:**
+- Replace any legacy import with the canonical scorer:
+  ```python
+  from src.scoring.graded_scorer import (
+      evaluate_candidate, evaluate_role, render_report, load_weights,
+  )
+  ```
+- The CLI accepts `--strategy keyword|semantic|hybrid` only as a deprecated alias that prints a `DeprecationWarning` and forwards to `graded`.
+
+**Prevention Strategy:**
+- The single canonical scorer is the only ranking signal. New code must use `graded_scorer`.
+- If you need to add a new scoring strategy, extend `graded_scorer` (e.g. add a new synonym, a new section priority, or a new tier dictionary) rather than introducing a parallel scorer.

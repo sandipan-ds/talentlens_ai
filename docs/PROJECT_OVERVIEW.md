@@ -1,10 +1,16 @@
 # HireIntel AI – Explainable Candidate Intelligence Platform
 
+> **Source of truth for scoring, evaluation, and ranking:**
+> [`WORKING_LOGIC.md`](WORKING_LOGIC.md). This document is the high-level
+> product overview; details about how scoring works live in `WORKING_LOGIC.md`.
+> For "what is implemented today vs what's planned", see
+> [`CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md).
+
 ## Project Overview
 
 HireIntel AI is an AI-powered Candidate Intelligence Platform designed to help recruiters screen, evaluate, rank, compare, and interact with job applicants in a transparent and explainable manner.
 
-Unlike traditional ATS systems that rely on keyword matching or black-box scoring, HireIntel AI allows recruiters to define their own hiring priorities and scoring weights. The platform then evaluates candidates using evidence extracted from resumes, generates recruiter-friendly summaries, provides explainable rankings, and enables conversational exploration of candidate profiles through Retrieval-Augmented Generation (RAG).
+Unlike traditional ATS systems that rely on keyword matching or black-box scoring, HireIntel AI allows recruiters to define their own hiring priorities and scoring weights — including the expected years of experience per requirement. The platform then evaluates candidates using evidence extracted from resumes, generates recruiter-friendly summaries, provides explainable rankings, and enables conversational exploration of candidate profiles through Retrieval-Augmented Generation (RAG) — with strict grounding so the LLM never invents candidate information.
 
 The goal is to reduce recruiter workload, improve screening consistency, and provide transparent, evidence-based hiring recommendations.
 
@@ -49,28 +55,37 @@ Unlike generic ATS systems and resume chatbots, HireIntel AI provides:
 Job Description Upload
           │
           ▼
+JD Validation & Clarification (Green / Yellow / Red)
+          │
+          ▼
 Requirement Extraction
           │
           ▼
-Recruiter Weight Configuration
+Recruiter Clarification (Yellow + Red items)
+          │
+          ▼
+Recruiter Weight Configuration (weights + expected_years)
           │
           ▼
 Resume Upload
           │
           ▼
-Resume Parsing
+Resume Cleaning + Parsing
           │
           ▼
-Structured Candidate Profiles
+Document-Aware Chunking
           │
           ▼
-Deterministic Scoring Engine
+Candidate Intelligence Report
+          │
+          ▼
+Deterministic Scoring Engine (single canonical scorer)
           │
           ▼
 Candidate Ranking
           │
           ▼
-Candidate Summaries
+Candidate Summaries (LLM-narrated, evidence-grounded)
           │
           ▼
 Candidate Comparison
@@ -82,13 +97,18 @@ Resume Chat (RAG)
 Hiring Recommendations
 ```
 
+The clarification loop is mandatory: the platform must not silently assume experience
+durations, degree equivalencies, or certification providers when the JD is ambiguous.
+See [`WORKING_LOGIC.md`](WORKING_LOGIC.md) for the full rules.
+
 ---
 
 # Phase 1: Job Description Intelligence
 
 ## Objective
 
-Understand hiring requirements before evaluating candidates.
+Understand hiring requirements before evaluating candidates — including asking for
+clarification when the JD is ambiguous.
 
 ## Input
 
@@ -98,12 +118,24 @@ Understand hiring requirements before evaluating candidates.
 
 * Required Skills
 * Preferred Skills
-* Required Experience
-* Education Requirements
-* Certifications
+* Required Experience (with **expected years** per skill)
+* Education Requirements (with degree equivalencies)
+* Certifications (with provider reputation)
 * Industry Experience
 * Leadership Requirements
 * Technology Stack
+
+## Clarification Loop (per `WORKING_LOGIC.md` Step 0)
+
+Every requirement is classified **Green / Yellow / Red**:
+
+* **Green** — Clear and measurable (e.g. "Python with 5+ years"). Enters the scoring policy directly.
+* **Yellow** — Partially defined (e.g. "Strong Python Skills"). The platform must ask the recruiter a follow-up question before scoring.
+* **Red** — Missing critical information (e.g. no experience duration). The platform must block the scoring policy until the recruiter clarifies.
+
+Yellow and Red items produce a `clarifications.json` next to the role's weight
+config listing the open questions. The scoring policy is locked only when all
+items are Green.
 
 ## Example
 
@@ -130,26 +162,39 @@ NIT / IIT
 
 ## Objective
 
-Allow recruiters to define what matters most for a particular role.
+Allow recruiters to define what matters most for a particular role — and to set
+the expected years of experience per skill.
 
 Instead of AI deciding candidate importance, recruiters assign weights.
+
+## Weights + Expected Years
+
+Each item in the recruiter's scoring policy carries:
+
+* `name` — the criterion.
+* `importance` — recruiter weight 0–10.
+* `expected_years` — target years of experience for this item (configurable,
+  default `10` when omitted).
+
+The total is normalized to a 0–100 scale via `scale_factor = 100 / max_score`,
+so cross-role comparisons work.
 
 ## Example
 
 ```text
-HTML                10 Points
-CSS                  5 Points
-JavaScript          10 Points
-React               10 Points
+HTML                10 Points    Expected: 6+ years
+CSS                  5 Points    Expected: 3+ years
+JavaScript          10 Points    Expected: 5+ years
+React               10 Points    Expected: 5+ years
 
-Same Role Experience 10 Points
-Industry Experience  5 Points
+Same Role Experience 10 Points    Expected: 6+ years
+Industry Experience  5 Points    Expected: 4+ years
 
 Education            3 Points
 Certifications       2 Points
 ```
 
-These weights become the hiring policy for candidate evaluation.
+These weights + expected years become the hiring policy for candidate evaluation.
 
 ---
 
@@ -191,118 +236,39 @@ The platform does not generate black-box scores.
 
 Every score must be supported by evidence.
 
----
-
-## Example Candidate Evaluation
-
-### Total Score: 87 / 100
-
-### Skills
-
-HTML
-
-Score: 10 / 10
-
-Reason:
-6 years of HTML experience identified.
+The canonical scorer lives in `src/scoring/graded_scorer.py`. It is the **only**
+ranking signal — `WORKING_LOGIC.md` is explicit that the platform must not
+implement multiple competing ranking systems.
 
 ---
 
-CSS
+## Two Scoring Modes
 
-Score: 5 / 10
+Per `WORKING_LOGIC.md` ("Fundamental Rule"), the scoring engine operates in two modes. In both modes, weight application and final aggregation are computed in code — never by the LLM.
 
-Reason:
-3 years of CSS experience identified.
+* **Code-only scoring** — used wherever a requirement is fully measurable: total years of experience (linear formula), institute tier (lookup table), certification tier (lookup table), skill presence + years (synonym match + regex detection). No LLM is involved.
+* **Rubric-bound LLM evidence scoring** — used wherever genuine judgment is required: skill depth, project complexity, relevant/same-role/leadership experience, domain expertise. The LLM reads the full content of the mapped section(s) via Section-Routed Evidence Retrieval and scores against a recruiter-defined rubric. The LLM never sees the weight and never computes the final contribution.
 
----
-
-React
-
-Score: 9 / 10
-
-Reason:
-5 years of React experience identified.
-
----
-
-### Experience
-
-Same Role Experience
-
-Score: 9 / 10
-
-Reason:
-5 years in similar role.
-
----
-
-Technology Alignment
-
-Score: 8 / 10
-
-Reason:
-Worked extensively with required technology stack.
-
----
-
-### Education
-
-Score: 7 / 10
-
-Reason:
-B.Tech from recognized institution.
-
----
-
-### Projects
-
-Score: 9 / 10
-
-Reason:
-Multiple projects aligned with target role.
+See [`AI_ARCHITECTURE.md`](AI_ARCHITECTURE.md) §5 for the full scoring workflow and output contract, and [`WORKING_LOGIC.md`](WORKING_LOGIC.md) "Scoring Rubrics" for the formulas.
 
 ---
 
 # Candidate Evaluation Dimensions
 
-The platform evaluates:
+The platform evaluates candidates across multiple dimensions. See [`WORKING_LOGIC.md`](WORKING_LOGIC.md) "Objective Candidate Evaluation" for the canonical list, and [`CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md) for the implementation status of each.
 
-* Skill Match
-* Skill Coverage
-* Relevant Experience
-* Technology Stack Experience
-* Industry Experience
-* Product Company Experience
-* Leadership Experience
-* Education Alignment
-* Certification Alignment
-* Project Relevance
-* Language Capabilities
-* Communication Quality
-* Resume Organization
+Objective metrics (skill coverage, relevant experience, education alignment, certification alignment) receive higher weighting than subjective metrics (communication quality, resume organization) per `AGENTS.md`.
 
 ---
 
-# Communication & Resume Quality Assessment
+# Quality-Based Evaluation (planned)
 
-The platform evaluates communication quality based on resume structure rather than visual design.
+When the recruiter enables it, the scorer consults:
 
-Evaluation Criteria:
+* **Institution quality tiers** — IIT / NIT / Tier-1 Private University / Regional.
+* **Certification provider reputation** — AWS / Microsoft / Google / Unknown.
 
-* Clarity
-* Organization
-* Chronological consistency
-* Information hierarchy
-* Readability
-* Professional communication
-* Achievement presentation
-
-The system does not reward or penalize resume length by itself.
-
-A longer resume can score highly if well structured.
-
-A shorter resume can score poorly if poorly organized.
+See `CURRENT_PROGRESS.md` and `IMPLEMENTATION_ROADMAP.md` Phase 4.5.
 
 ---
 
@@ -359,7 +325,7 @@ Example:
 
 ## Objective
 
-Enable conversational exploration of candidate information.
+Enable conversational exploration of candidate information via grounded RAG.
 
 Example Questions:
 
@@ -369,138 +335,43 @@ Example Questions:
 * Summarize leadership experience.
 * What certifications does this candidate possess?
 
-All responses must be grounded in retrieved resume content.
+All responses must be grounded in retrieved resume content. If no relevant chunk
+is found, the LLM responds with exactly:
+**"Information not found in candidate documents."**
+
+No speculation. No fabrication. The chunking strategy that supports this is
+Document-Aware Chunking (`src/rag/chunker.py`).
+
+---
+
+# Resume Matching (Cross-Candidate Pool Search)
+
+Embeddings and cosine similarity belong in **one place only**: searching across the whole candidate pool, not inside a single resume. The embedding pipeline (`src/rag/embeddings.py`) produces 384-dim vectors; the in-memory index (`data/embeddings/index.npz`) supports dense cosine retrieval for JD ↔ resume top-K triage and resume chat.
+
+Per-candidate evidence retrieval uses **Section-Routed Evidence Retrieval** instead — full, intact sections, not similarity-ranked fragments. See [`WORKING_LOGIC.md`](WORKING_LOGIC.md) "Section-Routed Evidence Retrieval".
+
+The similarity score is **not** the final ranking score. It is only one
+supporting/triage signal. Candidate ranking must always be driven by the
+deterministic scoring engine.
 
 ---
 
 # RAG Architecture
 
-## Chunking Strategy
+RAG is **only** for explanations, resume chat, and cross-candidate pool search. It never participates in per-candidate scoring. See [`AI_ARCHITECTURE.md`](AI_ARCHITECTURE.md) §11–§12 for the full architecture.
 
-Primary Strategy:
+**Two distinct retrieval strategies:**
 
-* Document-Aware Chunking
+* **Section-Routed Evidence Retrieval** (per-candidate, for scoring) — exact label match on canonical sections; no embeddings, no cosine. Full section content is sent to the rubric-bound LLM judge.
+* **Dense Cosine Retrieval** (cross-candidate pool search + resume chat) — embeddings via `sentence-transformers/all-MiniLM-L6-v2`, in-memory index (`data/embeddings/index.npz`).
 
-Optional Enhancement:
-
-* Semantic Chunking within large sections
-
-Examples:
-
-* Education
-* Experience
-* Projects
-* Skills
-* Certifications
-
-This preserves resume structure and improves retrieval quality.
-
----
-
-## Embedding Pipeline
-
-Possible Embedding Models:
-
-* BGE-M3
-* E5
-* Nomic
-* OpenAI Embeddings
-
-Selection rationale is documented separately in:
-
-AI_DESIGN_RATIONALE.md
-
----
-
-## Vector Database
-
-Potential options:
-
-* Qdrant
-* ChromaDB
-* Pinecone
-* FAISS
-
-Final selection is documented in:
-
-MODEL_REGISTRY.md
+Active chunking: Document-Aware Chunking (`src/rag/chunker.py`) with Header Normalization at parse time. See [`MODEL_REGISTRY.md`](MODEL_REGISTRY.md) for model details.
 
 ---
 
 # AI Evaluation Framework
 
-The platform evaluates performance at multiple levels.
-
-## Resume Parsing
-
-Metrics:
-
-* Precision
-* Recall
-* F1 Score
-
----
-
-## Retrieval Evaluation
-
-Metrics:
-
-* Recall@K
-* Precision@K
-* Mean Reciprocal Rank (MRR)
-* nDCG
-
----
-
-## Generation Evaluation
-
-Metrics:
-
-* Faithfulness
-* Groundedness
-* Answer Relevancy
-* Completeness
-
----
-
-## RAG Evaluation
-
-Metrics:
-
-* Context Recall
-* Context Precision
-* Faithfulness
-* Answer Relevancy
-
----
-
-## Candidate Ranking Evaluation
-
-Metrics:
-
-* Top-K Accuracy
-* Recruiter Agreement
-* Ranking Accuracy
-
----
-
-## Hallucination Evaluation
-
-Metrics:
-
-* Unsupported Statements
-* Hallucination Rate
-
----
-
-## Business Evaluation
-
-Metrics:
-
-* Screening Efficiency
-* Recruiter Time Saved
-* Recruiter Satisfaction
-* Shortlisting Accuracy
+The platform tracks AI quality across parsing, retrieval, generation, ranking, hallucination, and business metrics. See [`EVALUATION.md`](EVALUATION.md) for the full metric definitions and targets.
 
 ---
 

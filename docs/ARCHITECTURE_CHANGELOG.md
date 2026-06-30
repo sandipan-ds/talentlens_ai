@@ -6,12 +6,68 @@ This document records architecture changes that affect system structure, runtime
 
 ---
 
+## 2026-06-19 (PM) — Doc alignment sweep (WORKING_LOGIC.md as canonical)
+
+### Added
+- `docs/CURRENT_PROGRESS.md` — single status doc mapping every step of `WORKING_LOGIC.md` to ✅ / 🟡 / ⬜.
+- `docs/WORKING_LOGIC.md` is now the canonical scoring/evaluation spec (DEC-011). All other docs defer to it for scoring details.
+
+### Changed
+- `PROJECT_OVERVIEW.md` — added JD clarification loop (Green / Yellow / Red), per-item `expected_years`, single canonical scorer, RAG-as-explanation flow.
+- `SYSTEM_ARCHITECTURE.md` — Job Service now runs the clarification loop; Scoring Engine is the single canonical scorer; RAG Engine is explanation-only.
+- `AI_ARCHITECTURE.md` — §3 (JD processing) now includes the clarification classifier; §5 (Candidate Evaluation) rewritten around the single canonical scorer; legacy triad marked retired.
+- `RECRUITER_WORKFLOWS.md` — Workflow 2 now includes Green/Yellow/Red classification; Workflow 3 includes `expected_years`; Workflow 5 includes resume cleaning; Workflow 6 includes the years-proportional scoring rule.
+- `EVALUATION.md` — added per-item scoring evaluation metrics (Skill Presence Precision/Recall, Years Detection MAE, Per-item Score Accuracy, Evidence Section Precision, Snippet Faithfulness, Score Reproducibility).
+- `PROMPT_LIBRARY.md` — added SCORE-EXPLAIN-001 and CANDIDATE-COMPARE-001 prompt specs; marked RESUME-CHAT-001 as Active.
+- `IMPLEMENTATION_ROADMAP.md` — added Phase 4.5 (clarification loop + quality tiers + Candidate Intelligence Report); updated Phase 6 to reflect the mostly-built RAG pieces.
+- `DECISIONS.md` — added DEC-010 (single canonical scorer) and DEC-011 (WORKING_LOGIC.md is canonical); superseded DEC-008.
+
+### Decision
+- **WORKING_LOGIC.md is the canonical scoring/evaluation spec.** All other docs defer to it for scoring details. `CURRENT_PROGRESS.md` is the single status doc.
+
+---
+
+## 2026-06-19 (PM) — Phase 4 scorer consolidation
+
+### Added
+- Single canonical scorer (`src/scoring/graded_scorer.py`) that satisfies `docs/WORKING_LOGIC.md`.
+- Per-item scoring rule: `min(importance, candidate_years / expected_years × importance)` with `importance × 0.3` partial credit for mention-only matches.
+- Structured-profile search priority: `experience.entries → skills → education.entries → certifications → projects → summary`.
+- Summary-years fallback gated on item category (only non-Education / non-Certification items may use it).
+- CLI (`scripts/evaluate_one.py`) prints the recruiter-facing report in the exact format from `docs/PROJECT_OVERVIEW.md` Phase 4.
+- Batch CLI (`python -m src.scoring.batch_score`) writes ranked output to `data/scores/graded/<role>_ranked.json`.
+- `scripts/compare_scores.py` shows the canonical ranked table + per-candidate top strengths and gaps.
+
+### Removed
+- `src/scoring/keyword_scorer.py`
+- `src/scoring/semantic_scorer.py`
+- `src/scoring/hybrid_scorer.py`
+- `src/scoring/evidence.py`
+- `src/scoring/evaluate.py` (re-export shim)
+- `data/scores/keyword/`, `data/scores/semantic/`, `data/scores/hybrid/`
+- `data/scores/BusinessAnalyst_ranked.json` (orphan)
+- `tests/unit/test_hybrid_scorer.py`
+- `tests/unit/test_semantic_scorer.py`
+- `tests/unit/test_scoring.py`
+
+### Changed
+- Candidate scoring is no longer a triad of `keyword / semantic / hybrid` modules; those are deprecated and removed. The new `graded_scorer` is the single ranking signal.
+- Total normalized to 0-100 using the config's `scale_factor = 100 / max_score`.
+- `scripts/compare_two.py` reads from `data/scores/graded/`, surfaces per-item evidence, and accepts `--strategy graded` as the canonical choice (legacy strategy names print a deprecation warning and forward to graded).
+- `scripts/demo_scoring.py` shows the canonical per-item breakdown for the top-ranked candidate.
+
+### Decision
+- **Single deterministic scorer** — `WORKING_LOGIC.md` is explicit: *"you don't need so many different scoring or ranking systems, just one is enough."* Per-component breakdowns still come from the structured profile, not from running multiple scorers.
+- **RAG is reserved for explanations and resume chat** — never for ranking. The scorer itself is deterministic and offline.
+
+---
+
 ## 2026-06-19 (PM) — Phase 5
 
 ### Added
 - Candidate comparison engine (`scripts/compare_two.py`) for side-by-side recruiter-friendly candidate analysis.
   - Loads scored candidate profiles from `data/processed/<role>/<id>.json`.
-  - Retrieves hybrid scores from `data/scores/hybrid/<role>_ranked.json`.
+  - Retrieves canonical graded scores from `data/scores/graded/<role>_ranked.json`.
   - Generates deterministic "Why A ranked above B" narratives using score deltas and component breakdowns.
   - Displays component-level evidence: matched requirement counts, top strengths by category.
 - Integration tests for comparison workflow (`tests/integration/test_candidate_comparison.py`, 6 tests passing).

@@ -1,5 +1,9 @@
 # Evaluation
 
+> **Source of truth for scoring, evaluation, and ranking:**
+> [`WORKING_LOGIC.md`](WORKING_LOGIC.md). For "what is implemented today vs
+> what's planned", see [`CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md).
+
 ## Overview
 
 This document defines how HireIntel AI will measure AI quality, scoring reliability, retrieval performance, hallucination risk, and business impact.
@@ -73,6 +77,30 @@ Evaluation is required before promoting AI behavior, model changes, prompt chang
 
 ---
 
+## Candidate Scoring Evaluation (per-item, per `WORKING_LOGIC.md`)
+
+**Goal:** Measure whether the deterministic scorer awards the correct per-item score for the correct reason.
+
+### Code-Only Scoring Metrics
+
+- **Skill Presence Precision/Recall** — does the scorer correctly mark a skill as present vs absent?
+- **Skill Coverage Precision/Recall** — for JD items with N synonyms, does the scorer match all of them?
+- **Years Detection MAE** — mean absolute error between `candidate_years` and ground-truth years.
+- **Per-item Score Accuracy** — fraction of items where the awarded raw score equals the ground truth within ±0.5.
+- **Evidence Section Precision** — fraction of matched items where the cited profile section is the most informative one.
+- **Snippet Faithfulness** — fraction of snippets that contain the matched keyword (no fabricated text).
+- **Score Reproducibility** — same inputs → same score, byte-for-byte.
+
+### Rubric-Bound LLM Evidence Scoring Metrics
+
+- **Rubric Adherence** — fraction of LLM sub-scores that fall within the rubric-defined point anchors (does the LLM score against the recruiter rubric, not its own internal scale?).
+- **Extraction Completeness** — did the LLM extract all relevant evidence from the mapped section(s) before scoring? (Recall of evidence extraction.)
+- **LLM Judge Consistency** — same evidence + same rubric → same sub-score across repeated calls (test-retest reliability).
+- **Weight Blindness** — verify that the LLM never receives the requirement's weight during scoring (audit prompt construction).
+- **No-Aggregation Compliance** — verify that the LLM never computes the final weighted contribution (audit prompt + output schema).
+- **Double-Count Detection** — verify that overlapping experience (e.g. 6 years Python on cluster systems + 6 years managing recommendation projects) is not summed to 12 years.
+- **Sub-score Calibration** — correlation between LLM sub-scores and recruiter-expert ground-truth sub-scores on a labeled dataset.
+
 ## Candidate Ranking Evaluation
 
 **Goal:** Measure whether deterministic ranking aligns with recruiter-defined scoring policies and expert review.
@@ -83,6 +111,8 @@ Evaluation is required before promoting AI behavior, model changes, prompt chang
 - ranking accuracy
 - tie-break correctness
 - score reproducibility
+
+**Ground truth:** for each role, hand-score the top-N candidates against the recruiter's locked scoring policy, then compare to the deterministic scorer's output.
 
 ---
 

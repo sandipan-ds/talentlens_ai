@@ -1,5 +1,11 @@
 # System Architecture
 
+> **Source of truth for scoring, evaluation, and ranking:**
+> [`WORKING_LOGIC.md`](WORKING_LOGIC.md). This document covers the high-level
+> system architecture; AI-specific architecture is in
+> [`AI_ARCHITECTURE.md`](AI_ARCHITECTURE.md). For "what is implemented today
+> vs what's planned", see [`CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md).
+
 ## Overview
 
 This document describes the high-level architecture, system components, service interactions, and deployment model for the HireIntel AI platform.
@@ -43,7 +49,7 @@ HireIntel AI follows a modular, service-oriented architecture designed to suppor
 
 ### 1. User Interface (UI)
 - **Technology:** Streamlit
-- **Purpose:** Provides an intuitive web interface for recruiters to upload job descriptions, configure weights, upload resumes, view rankings, and interact with candidates.
+- **Purpose:** Provides an intuitive web interface for recruiters to upload job descriptions, clarify ambiguous requirements, configure weights (with `expected_years` per item), upload resumes, view rankings, and interact with candidates.
 
 ### 2. API Gateway / Backend for Frontend (BFF)
 - **Technology:** FastAPI
@@ -52,42 +58,47 @@ HireIntel AI follows a modular, service-oriented architecture designed to suppor
 ### 3. Core Services
 
 #### Job Service
-- Manages job description lifecycle (upload, storage, requirement extraction)
-- Interfaces with the Parser Engine for JD processing
-- Persists structured job requirements
+- Manages job description lifecycle (upload, storage, requirement extraction).
+- Runs the **JD clarification loop** (Green / Yellow / Red classification) per `WORKING_LOGIC.md` Step 0 — refuses to lock the scoring policy until all items are Green.
+- Interfaces with the Parser Engine for JD processing.
+- Persists structured job requirements and the `clarifications.json` artifact.
 
 #### Resume Service
-- Manages resume upload, storage, and parsing
-- Coordinates with the Parser Engine for structured profile extraction
-- Handles document chunking and embedding pipeline
+- Manages resume upload, storage, parsing, and cleaning (headers / footers / template noise).
+- Coordinates with the Parser Engine for structured profile extraction.
+- Handles document chunking and embedding pipeline.
 
 #### Candidate Service
-- Orchestrates candidate evaluation and ranking
-- Manages scoring policy application
-- Provides candidate comparison and summary generation
+- Orchestrates candidate evaluation and ranking using the **single canonical deterministic scorer** (`src/scoring/graded_scorer.py`).
+- Manages scoring policy application (weights + expected_years).
+- Provides candidate comparison and summary generation.
+- Produces the **Candidate Intelligence Report** aggregating per-item evidence.
 
 #### Report Service
-- Generates evaluation reports, comparison matrices, and hiring recommendations
-- Formats data for recruiter-friendly presentation
+- Generates evaluation reports, comparison matrices, and hiring recommendations.
+- Formats data for recruiter-friendly presentation.
 
 ### 4. AI/ML Layer
 
 #### Parser Engine
-- Extracts structured information from unstructured documents (resumes, job descriptions)
-- Uses a combination of NLP techniques and LLM-based information extraction
+- Extracts structured information from unstructured documents (resumes, job descriptions).
+- Uses a combination of NLP techniques and LLM-based information extraction.
+- Output: structured profile JSON in `data/processed/<role>/<id>.json`.
 
 #### Embedding Service
-- Generates vector embeddings for resume sections and chunks
-- Manages embedding model loading and inference
+- Generates vector embeddings for resume sections and chunks.
+- Active model: `sentence-transformers/all-MiniLM-L6-v2` (384-dim, CPU-runnable).
 
 #### Scoring Engine
-- Applies deterministic scoring based on recruiter-defined weights
-- Calculates objective and subjective metrics
-- Produces explainable, reproducible scores
+- Single canonical deterministic scorer: `src/scoring/graded_scorer.py`.
+- Per-item score: `min(importance, candidate_years / expected_years × importance)`, with partial credit for mention-only matches.
+- Total normalized to 0–100 via `scale_factor = 100 / max_score`.
+- Produces explainable, reproducible scores with per-item evidence (section, snippet, years, reason).
 
 #### RAG Engine
-- Retrieves relevant resume chunks based on recruiter queries
-- Generates grounded, context-aware responses using retrieved content
+- Retrieves relevant resume chunks based on recruiter queries (dense cosine over in-memory index).
+- Generates grounded, context-aware responses via OpenRouter LLM with strict-grounding prompt.
+- **RAG never participates in scoring** — it only explains scores that the deterministic engine produced.
 
 ### 5. Infrastructure Layer
 
@@ -145,14 +156,15 @@ HireIntel AI follows a modular, service-oriented architecture designed to suppor
 - **Scalable** — individual services can be scaled horizontally based on demand
 
 ### Request Flow
-1. Recruiter uploads a job description via the UI
-2. API Gateway receives the request and forwards it to the Job Service
-3. Job Service persists the JD and triggers asynchronous requirement extraction
-4. Parser Engine extracts structured requirements and stores them
-5. Recruiter configures weights, which are persisted as a scoring policy
-6. Resumes are uploaded, triggering async parsing and embedding
-7. Scoring Engine evaluates candidates using the defined policy
-8. Results are stored and made available via the Candidate Service
+1. Recruiter uploads a job description via the UI.
+2. API Gateway forwards the request to the Job Service.
+3. Job Service persists the JD, runs the **clarification loop** (Green / Yellow / Red), and surfaces unresolved items to the recruiter.
+4. Parser Engine extracts structured requirements and stores them.
+5. Recruiter configures **weights + expected_years per item**, which are persisted as a scoring policy. The policy is locked only when all items are Green.
+6. Resumes are uploaded, triggering async parsing, cleaning, and embedding.
+7. **Single deterministic Scoring Engine** evaluates every candidate against the policy; output is `data/scores/graded/<role>_ranked.json`.
+8. Results are stored and made available via the Candidate Service.
+9. RAG Engine handles free-form recruiter questions (resume chat, comparison narratives) using retrieved chunks + LLM with strict-grounding prompt. **RAG never overrides the deterministic ranking.**
 
 ---
 

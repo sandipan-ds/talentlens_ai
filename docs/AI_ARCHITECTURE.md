@@ -1,5 +1,11 @@
 # AI Architecture
 
+> **Source of truth for the candidate evaluation contract, scoring rules, and
+> ranking discipline:** [`WORKING_LOGIC.md`](WORKING_LOGIC.md). This document
+> is the source of truth for AI workflows (chunking, embedding, retrieval,
+> RAG). For "what is implemented today vs what's planned", see
+> [`CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md).
+
 ## Overview
 
 This document is the source of truth for all AI-related architecture in the HireIntel AI platform. It defines the end-to-end workflows, chunking strategies, embedding pipelines, retrieval mechanisms, and RAG-based interactions.
@@ -60,26 +66,71 @@ This document is the source of truth for all AI-related architecture in the Hire
 
 ---
 
-## 3. Job Description (JD) Processing Workflow
+## 2a. Structured Candidate Profile Extraction
 
-**Purpose:** Analyze and extract structured hiring requirements from job descriptions.
+**Purpose:** Extract exact, unambiguous facts directly from the cleaned resume as a deterministic structured record — separate from chunking and separate from retrieval.
+
+Per `WORKING_LOGIC.md` ("Structured Candidate Profile Extraction"), facts that are exact and unambiguous — a degree name, a certification title, total years of experience — are read directly from the structured profile rather than re-derived through search. Similarity search can miss or under-rank a chunk containing an exact fact; a structured lookup cannot.
 
 ```text
-[JD Upload] -> [Parser Engine] -> [Structured Requirements] -> [Document Database]
+[Cleaned Resume] -> [Structured Profile Extractor] -> [Structured Profile Record]
+                                                         (degrees, certs, total
+                                                          experience, companies,
+                                                          dates)
+```
+
+**Extracted Fields:**
+- Degrees and institutions
+- Certifications
+- Total experience (years)
+- Companies and roles
+- Employment dates
+
+**Key Rule:** Requirements that are purely factual (e.g. "Does the candidate hold a Bachelor's degree?") may be answered entirely from this structured profile, bypassing Section-Routed Evidence Retrieval. Requirements that require interpretation (e.g. "How deep is the candidate's Power BI expertise?") still rely on Section-Routed Evidence Retrieval and rubric-bound LLM evidence scoring (see §5).
+
+**Output:** Structured profile record stored alongside the chunked sections. This record is the input for code-only scoring of total experience, institute tier, and certification tier.
+
+---
+
+## 3. Job Description (JD) Processing Workflow
+
+**Purpose:** Analyze and extract structured hiring requirements from job descriptions, and refuse to score until ambiguous items are clarified.
+
+```text
+[JD Upload] -> [Parser Engine] -> [Structured Requirements]
+                                            │
+                                            ▼
+                                  [Clarification Classifier]
+                                  Green | Yellow | Red
+                                            │
+                                            ▼
+                                  [clarifications.json]
+                                            │
+                                            ▼
+                                  [Recruiter UI: answer Yellow + Red]
+                                            │
+                                            ▼
+                                  [Scoring Policy (all Green)]
 ```
 
 **Extracted Information:**
 - Required Skills
 - Preferred Skills
-- Required Experience (years, role type)
-- Education Requirements
-- Certifications
+- Required Experience (years, role type) — **per-skill expected_years** is surfaced as a recruiter question when missing
+- Education Requirements — **degree equivalencies** are surfaced when ambiguous
+- Certifications — **provider reputation tier** is surfaced when ambiguous
 - Industry Experience
 - Leadership Requirements
 - Technology Stack
 - Location / Remote preferences
 
-**Output:** Structured JD object stored and linked to the employer's account.
+**Clarification Rules (per `WORKING_LOGIC.md` Step 0):**
+
+* **Green** — Clear and measurable. Enters the scoring policy directly.
+* **Yellow** — Partially defined. Platform must auto-generate a follow-up question (e.g. "What minimum Tableau experience qualifies as 'strong'?") and block the scoring policy until answered.
+* **Red** — Missing critical info. Hard block until clarified.
+
+**Output:** Structured JD object stored and linked to the employer's account, plus `clarifications.json` listing open questions. Scoring policy is locked only when every item is Green.
 
 ---
 
@@ -113,74 +164,165 @@ This document is the source of truth for all AI-related architecture in the Hire
 
 **Purpose:** Evaluate each candidate against the recruiter's scoring policy using evidence from their resume.
 
-The platform ships **three independent scoring strategies** that produce ranked candidate lists. Recruiters select the strategy per role; the comparison view (`scripts/compare_scores.py`) shows rank deltas across strategies.
+Per `WORKING_LOGIC.md` ("Fundamental Rule") and the deprecation note in
+`AI_DESIGN_RATIONALE.md` §5, the platform ships **one** deterministic scorer.
+Multiple competing ranking systems are explicitly disallowed.
+
+The scoring engine operates in **two modes**, both of which compute weight
+application and final aggregation in code — never in the LLM:
 
 ```text
-[Structured Profile] + [Scoring Policy] + [Resume Chunks] + [JD Bullets]
+[Structured Profile] + [Chunked Sections] + [Scoring Policy (weights + expected_years)]
                               │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-[Keyword Scorer]       [Semantic Scorer]      [Hybrid Scorer]
-   keyword_scorer.py     semantic_scorer.py     hybrid_scorer.py
-        │                     │                     │
-        ▼                     ▼                     ▼
-data/scores/keyword/  data/scores/semantic/  data/scores/hybrid/
+                   ┌──────────┴──────────┐
+                   ▼                     ▼
+         Code-Only Scoring       Rubric-Bound LLM Evidence Scoring
+         (total experience,      (skill depth, relevant experience,
+          institute tier,         project complexity, domain expertise)
+          certification tier)              │
+                   │                     ▼
+                   │           Section-Routed Evidence Retrieval
+                   │           (full mapped section content → LLM judge
+                   │            with recruiter-defined rubric)
+                   │                     │
+                   └──────────┬──────────┘
+                              ▼
+                   Weighted Aggregation (Code)
+                              │
+                              ▼
+               data/scores/graded/<role>_ranked.json
 ```
 
-**Evaluation Dimensions:**
-- Skill Match / Skill Coverage
-- Relevant Experience (same role, technology, industry)
-- Product Company Experience
-- Education Alignment
-- Certification Alignment
-- Project Relevance
-- Language Capabilities
-- Leadership Experience
-- Communication Quality (subjective)
-- Resume Organization (subjective)
+**Evaluation Dimensions by Scoring Mode:**
 
-### 5.1 Keyword Scorer (deterministic)
+| Dimension | Mode | Status |
+|---|---|---|
+| Skill Presence | Code-only (synonym match) | ✅ Active |
+| Skill Years (total) | Code-only (regex years detection) | ✅ Active |
+| Skill Depth / Project Relevance | Rubric-bound LLM | ⬜ Planned |
+| Relevant Experience (same-role, industry, leadership) | Rubric-bound LLM | ⬜ Planned |
+| Total Experience (years) | Code-only (structured profile) | ✅ Active |
+| Education (Degree Match) | Code-only (structured profile) | ✅ Active |
+| Education (Institute Tier) | Code-only (tier lookup) | ⬜ Planned |
+| Certification (Match) | Code-only (synonym match) | ✅ Active |
+| Certification (Provider Tier) | Code-only (tier lookup) | ⬜ Planned |
+| Language Capabilities | Code-only (alias match) | 🟡 Partial |
+| Communication Quality | Rubric-bound LLM | ⬜ Planned |
+| Resume Organization | Rubric-bound LLM | ⬜ Planned |
 
-Per the scoring guide (`data/Job descriptions/<role>/<role>_ScoringGuide.md`), each candidate's score on a recruiter-weighted item is **binary**: either the candidate has evidence for that item (full `importance` points) or not (0). Special handling:
+### 5.1 Code-Only Scoring (`src/scoring/graded_scorer.py`)
 
-- **Years of experience**: parsed from experience entries (`dates` fields), spans merged.
-- **Bachelor's degree**: detected from education entries (`BE/BTech or equivalent` accepts BBA, BS, BSc, etc.).
-- **Keyword match**: per-item keyword list scanned across the candidate's full profile text.
+Used wherever a requirement is fully measurable without judgment: total
+years of experience (linear formula), institute tier (lookup table),
+certification tier (lookup table). No LLM is involved at all.
 
-The keyword scorer is auditable: every component links to a `chunk_id` + `source_file` so recruiters can click through to the original PDF.
+For every recruiter-defined item handled by this mode:
 
-### 5.2 Semantic Scorer (cosine)
+1. **Expand the item name** into a synonym dictionary (e.g. `Power BI → powerbi, pbi, dax, power query`), compiled as word-boundary regex patterns.
+2. **Search the structured profile** in priority order: `experience.entries[*].details` → `skills` → `education.entries` → `certifications` → `projects` → `summary`. Raw-text regex is never used.
+3. **Detect years of experience** near the matched alias (`X year(s)` / `X+ yr(s)` within 80 chars). For experience-style items, fall back to the summary's "X+ years of experience as …" line.
+4. **Compute the per-item raw score** on the recruiter's 0–10 scale:
 
-Each JD bullet (line under `## Key Responsibilities`, `## Required Skills`, etc.) is embedded with the chunking model. For each candidate, the bullet is matched against the candidate's own chunks (candidate-scoped, not global). The candidate's score on a bullet = `max cosine(bullet, candidate.chunks)`. The candidate's overall semantic score = `mean(bullet_score) × 100`.
+    * **No evidence** → `0`
+    * **Mentioned, no years measured** → `importance × 0.3` (partial credit)
+    * **Years measured** → `min(importance, candidate_years / expected_years × importance)` (proportional)
+5. **Normalize to 0–100** using the config's `scale_factor = 100 / max_score` and `normalized_importance` per item.
 
-This scorer catches synonyms and paraphrases the keyword scorer misses (e.g. "ML" ↔ "machine learning", "led 12 workshops" ↔ "requirement elicitation workshops").
+### 5.2 Rubric-Bound LLM Evidence Scoring
 
-### 5.3 Hybrid Scorer (blended)
+Used wherever genuine judgment is required: skill depth, project complexity,
+relevant/same-role/leadership experience, domain expertise. The LLM reads the
+full content of the section(s) that the requirement maps to (see
+**Section-Routed Evidence Retrieval**, §11a) and maps it onto a
+recruiter-defined point scale — never onto a free-form label.
 
-`final_score = α × keyword_score + (1 - α) × semantic_score`, default `α = 0.5` (CLI flag `--alpha`).
+**Key constraints (per `WORKING_LOGIC.md`):**
+- The LLM must **not** see the requirement's weight while scoring evidence.
+- The LLM must **never** compute the final weighted contribution.
+- The LLM scores strictly against a recruiter-defined rubric — never against its own internal notion of "Advanced" or "Strong."
+- Weight application and final score aggregation are always computed in code.
 
-The hybrid ranks candidates that are robust across both strategies highest, while giving partial credit to candidates strong in one strategy but weak in the other. Both per-component breakdowns are preserved so recruiters see *why* a candidate scored what they did under each lens.
+**Workflow per requirement:**
+
+```text
+[Requirement] -> [Section Mapping (fixed table)]
+                          │
+                          ▼
+           [Fetch all chunks tagged with mapped section(s)]
+           (exact label match — no embeddings, no cosine)
+                          │
+                          ▼
+           [LLM Judge: extract relevant evidence, then score
+            against recruiter-defined rubric]
+                          │
+                          ▼
+           [Structured sub-scores (0.0–1.0 per sub-question)]
+                          │
+                          ▼
+           [Code: weight × sub-score → weighted contribution]
+```
+
+**Extraction before scoring:** The LLM is asked to first extract what's
+relevant from the mapped section(s) (e.g. "list every role where Python
+appears, with dates"), then score against the rubric. This keeps the read
+systematic rather than holistic, and prevents the model from being influenced
+by content outside the mapped section.
+
+**Deterministic metadata filtering:** If a section is unusually long (a senior
+candidate's multi-page Experience history), deterministic metadata filtering
+(`skills_asserted contains "Python"`) narrows it further — still an exact
+filter, not a similarity rank.
+
+**See `PROMPT_LIBRARY.md` RUBRIC-SCORE-001 for the production prompt spec.**
+
+### 5.3 Why Years-Proportional Scoring
+
+A candidate with 1 year of Power BI does not receive the same score as a candidate with 6 years. The score is proportional to `candidate_years / expected_years × importance`, capped at the item's `importance`. The default `expected_years = 10` (configurable per item) means recruiters can tune the depth required for any criterion.
 
 ### 5.4 Output Contract
-
-All three strategies return the same shape per candidate:
 
 ```json
 {
   "candidate_id": "cand_xxx",
-  "role_bucket": "BusinessAnalyst",
-  "source_file": "...",
-  "raw_score": ...,
-  "max_score": ...,
-  "normalized_score": ...,
-  "components": [
-    { "category": "...", "item_name": "...", "importance": ..., "matched": true,
-      "matched_weight": ..., "chunk_id": "...", "snippet": "...", "source_file": "...", "notes": "..." }
+  "role": "Business Analyst Lead",
+  "total_raw": 56.8,
+  "total_max": 103.0,
+  "total": 40.6,
+  "rank": 1,
+  "categories": [
+    {
+      "name": "Core Skills",
+      "score": 21.5,
+      "max_score": 43.0,
+      "items": [
+        {
+          "category": "Core Skills",
+          "item_name": "Requirements Gathering",
+          "description": "...",
+          "importance": 8,
+          "expected_years": 6,
+          "matched": true,
+          "years_detected": 5.0,
+          "raw_score": 6.7,
+          "score": 5.0,
+          "section": "experience",
+          "snippet": "Gather business requirements and translate them into user stories.",
+          "reason": "5 year(s) of Requirements Gathering experience identified in the experience section — below the recruiter target of 6 year(s)."
+        }
+      ]
+    }
   ]
 }
 ```
 
-Hybrid additionally includes `keyword_score`, `semantic_score`, `final_score`, `alpha`, and both component lists.
+Every score carries: matched boolean, years detected, **matched profile section**, **exact snippet that earned the score**, and a recruiter-readable reason. Recruiters can click the snippet and see the original resume text.
+
+### 5.5 Legacy Triad (Retired)
+
+The legacy `keyword_scorer / semantic_scorer / hybrid_scorer` modules were
+removed 2026-06-19. The CLI accepts `--strategy keyword|semantic|hybrid` only
+as a deprecated alias that prints a `DeprecationWarning` and forwards to
+`graded`. See `ARCHITECTURE_CHANGELOG.md` for the file-by-file change list.
 
 ---
 
@@ -189,16 +331,17 @@ Hybrid additionally includes `keyword_score`, `semantic_score`, `final_score`, `
 **Purpose:** Rank candidates deterministically based on evaluation scores.
 
 ```text
-[All Evaluation Reports] -> [Normalization] -> [Weighted Aggregation] -> [Ranked List]
+[All Evaluation Reports] -> [Single Scorer Normalization] -> [Ranked List]
+data/scores/graded/<role>_ranked.json
 ```
 
-**Key Rules:**
-- LLM does NOT directly determine rankings
-- Rankings are derived from the deterministic Scoring Engine
-- Ties are broken by highest objective score
-- Rankings are reproducible given the same inputs
+**Key Rules (per `WORKING_LOGIC.md`):**
+- LLM does **not** directly determine rankings — ever.
+- Rankings are derived from the single deterministic Scoring Engine.
+- Tie-breaks: by matched-item count, then by raw score, then by candidate_id (deterministic).
+- Rankings are reproducible given the same inputs.
 
-**Output:** Sorted candidate list with per-dimension scores and explanations.
+**Output:** `data/scores/graded/<role>_ranked.json` — sorted candidate list with per-item scores, sections, snippets, and reasons.
 
 ---
 
@@ -271,14 +414,69 @@ Chunks are emitted as JSONL files at `data/chunks/<role_bucket>/<candidate_id>.j
 
 The `char_span` references offsets into the profile's `raw_text`, so RAG answers can cite the exact substring.
 
+**Chunk Metadata (per `WORKING_LOGIC.md` "Chunk Metadata Schema"):**
+
+Every chunk is enriched with metadata at parse time, not inferred later by an LLM. A chunk on its own is not enough — a bullet that mentions a skill is useless for scoring if it loses the dates and context of the role it came from.
+
+```text
+chunk:
+  section_type: experience | education | skills_summary | projects | certifications | header
+  parent_structure:
+    organization
+    role_title
+    location
+    temporal_context:
+      start_date
+      end_date
+      is_current
+      calculated_duration_months   ← computed deterministically, never by the LLM
+  skills_asserted: [ ... ]
+  experience_type: professional | personal_project | academic | unknown
+```
+
+- `calculated_duration_months` is computed in code from parsed dates at parse time. LLMs are unreliable at date arithmetic, so this number is handed to the LLM ready-made.
+- `experience_type` lets scoring distinguish a skill used professionally from one mentioned only in a personal project or coursework.
+- `skills_asserted` enables deterministic metadata filtering when a section is too long for full-content routing.
+- Stable `candidate_id` (sha1 of source file path, 12 hex chars).
+- `char_span` into raw resume text (citation-ready).
+
 **Sub-split rule:** any chunk longer than `MAX_CHUNK_CHARS = 1200` is split on paragraph boundaries (`\n\n`) with `SPLIT_OVERLAP_CHARS = 120` overlap, ensuring no chunk exceeds the embedding model's comfortable context.
 
-**Chunk Metadata:**
-- Section type (e.g. "experience", "education")
-- Document hierarchy (parent section, chunk index within section)
-- Stable `candidate_id` (sha1 of source file path, 12 hex chars)
-- `char_span` into raw resume text (citation-ready)
-- Per-section `metadata` (title, company, dates, etc. for experience)
+### 9a. Header Normalization
+
+**Purpose:** Resumes do not use consistent section names: "Skills" vs "Technical Skills" vs "Core Competencies"; "Experience" vs "Employment History" vs "Career History". Routing a JD requirement to "the Education section" only works if every resume's education-like header maps to the same canonical label.
+
+Per `WORKING_LOGIC.md` ("Header Normalization"), this is handled **once per resume, at parse time** — not once per requirement, and not by similarity ranking.
+
+**Canonical Sections:**
+
+```text
+Personal_Info | Education | Experience | Projects
+| Skills | Certifications | Languages
+```
+
+**Layer 1 — Synonym Lookup (free, deterministic):**
+
+A maintained table catches the large majority of headers with no model call:
+
+```text
+"work experience" | "employment history" | "professional experience"
+  | "job experience" | "career history"          → Experience
+"skills" | "technical skills" | "core competencies"
+  | "technical proficiencies"                    → Skills
+"education" | "academic background"
+  | "academic qualifications"                    → Education
+"certifications" | "licenses" | "credentials"
+  | "licenses & certifications"                  → Certifications
+```
+
+**Layer 2 — Fallback Classification (one model call, only for unmatched headers):**
+
+If a header doesn't match the table — or a resume has no headers at all and uses free-flowing paragraphs — one classification call per resume assigns it to a canonical section. This is a discrete classification into a fixed set of 7 buckets, not a similarity score, so it is deterministic-enough and auditable: the system logs which header (or absence of one) produced which label and with what confidence.
+
+**Multi-Tag Chunks:**
+
+Content does not always respect section boundaries even after labeling — a bullet under "Projects" can describe genuine professional work; a line under "Experience" can describe a certification earned on the job. A chunk is allowed to carry more than one section tag when its content genuinely spans categories, rather than being forced into a single bucket.
 
 ---
 
@@ -306,9 +504,45 @@ The `char_span` references offsets into the profile's `raw_text`, so RAG answers
 
 ## 11. Retrieval Architecture
 
-**Purpose:** Retrieve the most relevant resume content in response to recruiter queries.
+**Purpose:** Retrieve resume content for two distinct purposes that must not be conflated: (a) per-candidate evidence for scoring, and (b) cross-candidate pool search / RAG chat.
 
-**Retrieval Strategy: Dense Cosine over In-Memory Vector Index**
+Per `WORKING_LOGIC.md`, these are fundamentally different operations:
+
+### 11a. Section-Routed Evidence Retrieval (Per-Candidate, for Scoring)
+
+A JD requirement does not need to be searched for inside a resume — a resume is one short document (typically 1,000–3,000 tokens), and once it is chunked and header-normalized, the system already knows exactly where each requirement's evidence lives. Similarity ranking is the wrong tool here: a single resume isn't a corpus to search, it's something to read.
+
+```text
+[JD Requirement] -> [Section Mapping (fixed table)]
+                          │
+                          ▼
+           [Fetch all chunks tagged with mapped section(s)]
+           (exact label match — no embeddings, no cosine)
+                          │
+                          ▼
+           [Full section content per requirement]
+```
+
+**Fixed section mapping table (not a model decision):**
+
+```text
+Education requirement      → Education chunk(s)
+Skill / experience depth   → Experience + Projects + Skills chunks
+Certification requirement  → Certifications chunk(s)
+```
+
+**Key rules (per `WORKING_LOGIC.md` "Section-Routed Evidence Retrieval"):**
+- Retrieval is an **exact label match** — fetch every chunk tagged with the mapped section(s), never a ranked top-K subset.
+- Nothing is filtered out; the same requirement against the same resume always returns the same content.
+- No embeddings, no cosine similarity, no risk of a relevant chunk silently falling below a similarity cutoff.
+- Fields that belong together (institute, branch, CGPA) can never get split across separate retrieval calls.
+- If a section is unusually long, deterministic metadata filtering (`skills_asserted contains "Python"`) narrows it further — still an exact filter, not a similarity rank.
+
+This is the retrieval strategy used by the **rubric-bound LLM evidence scoring** mode (§5.2).
+
+### 11b. Dense Cosine Retrieval (Cross-Candidate Pool Search + RAG Chat)
+
+This is the one place embeddings and similarity search belong — searching across the whole candidate pool, not inside a single resume.
 
 ```text
 [Recruiter / JD Bullet] -> [Embed] -> [Cosine over data/embeddings/index.npz] -> [Top-K Chunks]
@@ -316,25 +550,50 @@ The `char_span` references offsets into the profile's `raw_text`, so RAG answers
 
 **Used in two contexts:**
 
-1. **JD ↔ Resume matching** (`src/rag/jd_match.py`) — recruiter-facing top-K candidates per JD.
-2. **Semantic scoring** (`src/scoring/semantic_scorer.py`) — JD bullet ↔ candidate's own chunks (candidate-scoped, see § 5.2).
+1. **Resume Matching / triage** (`src/rag/jd_match.py`) — narrowing a large applicant pool before running the full per-candidate rubric scoring pass. Open-ended pool search: "find candidates with healthcare domain experience" across every resume on file.
+2. **Resume Chat** (`src/rag/retriever.py`) — recruiter questions about a candidate answered via RAG (see §12).
 
 **Configuration:**
 - Top-K chunks retrieved: 5–10 (configurable per call)
 - Similarity threshold: minimum cosine to count as a "match" (default 0.30, configurable)
 - Optional `role_bucket` filter on retrieval
 
+**Critical constraint:** The similarity score is **not** the final ranking score. It is only one supporting/triage signal. Candidate ranking must always be driven by the deterministic scoring engine (§5).
+
 ---
 
 ## 12. RAG Workflow
 
-**Purpose:** Answer recruiter questions with grounded, resume-based information.
+**Purpose:** Answer recruiter questions with grounded, resume-based information, and explain scores using cached rubric reasoning.
+
+### 12a. Score Explanation (Cached Reasoning First)
+
+Per `WORKING_LOGIC.md` ("Score Explanation"), when a recruiter asks "why did
+this candidate receive this score?", the system returns the **rubric
+sub-scores and cited evidence stored at scoring time** — this is the default
+path. It keeps explanations fast, cheap, and guaranteed consistent with the
+original score.
 
 ```text
-[Recruiter Question] -> [Retrieval] -> [Context Assembly] -> [Prompt Construction] -> [LLM]
-                                                                              |
-                                                                              v
-                                                                      [Grounded Answer]
+[Recruiter asks "why"] -> [Return cached rubric sub-scores + cited evidence]
+```
+
+If the recruiter asks a follow-up that goes beyond what was stored, the system
+re-fetches the mapped section(s) for that requirement (Section-Routed Evidence
+Retrieval, §11a) and generates a fresh answer grounded in them. Because every
+requirement's evidence already comes from a fixed, fully-included section
+rather than a similarity-ranked subset, a follow-up re-fetch always returns
+the same content as the original scoring pass.
+
+See `PROMPT_LIBRARY.md` SCORE-EXPLAIN-001.
+
+### 12b. Resume Chat (RAG)
+
+```text
+[Recruiter Question] -> [Dense Cosine Retrieval (§11b)] -> [Context Assembly] -> [Prompt Construction] -> [LLM]
+                                                                                                    |
+                                                                                                    v
+                                                                                            [Grounded Answer]
 ```
 
 **Prompt Construction:**

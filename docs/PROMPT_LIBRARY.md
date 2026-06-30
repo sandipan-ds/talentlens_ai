@@ -1,5 +1,9 @@
 # Prompt Library
 
+> **Source of truth for scoring, evaluation, and ranking:**
+> [`WORKING_LOGIC.md`](WORKING_LOGIC.md). For "what is implemented today vs
+> what's planned", see [`CURRENT_PROGRESS.md`](CURRENT_PROGRESS.md).
+
 ## Overview
 
 This document stores production prompt specifications for HireIntel AI.
@@ -13,10 +17,12 @@ Each production prompt must include a prompt ID, purpose, inputs, outputs, const
 | Prompt ID | Purpose | Status |
 | --- | --- | --- |
 | JD-EXTRACT-001 | Extract structured hiring requirements from a job description | Planned |
-| RESUME-PARSE-001 | Extract a structured candidate profile from resume content | Planned |
+| RESUME-PARSE-001 | Extract a structured candidate profile from resume content | Planned (current parser is rule-based; LLM extraction is the upgrade path) |
+| RUBRIC-SCORE-001 | Score candidate evidence against a recruiter-defined rubric | Planned |
 | CANDIDATE-SUMMARY-001 | Generate an evidence-based recruiter summary | Planned |
-| CANDIDATE-COMPARE-001 | Compare candidates using structured evidence | Planned |
-| RESUME-CHAT-001 | Answer recruiter questions using retrieved resume chunks | Planned |
+| CANDIDATE-COMPARE-001 | Compare candidates using structured evidence | Active (used by `scripts/compare_two.py` when LLM is configured) |
+| RESUME-CHAT-001 | Answer recruiter questions using retrieved resume chunks | Active (`hireintel_ai/llm/service.py`) |
+| SCORE-EXPLAIN-001 | Narrate a per-item score using retrieved evidence + scorer output | Active (used by score-explanation flow) |
 | HIRING-RECOMMENDATION-001 | Generate evidence-backed hiring recommendation text | Planned |
 
 ---
@@ -50,6 +56,41 @@ Each production prompt must include a prompt ID, purpose, inputs, outputs, const
 
 **Version History:**
 - v0.1: Initial planned prompt specification.
+
+---
+
+## RUBRIC-SCORE-001
+
+**Purpose:** Score candidate evidence against a recruiter-defined rubric for requirements that require judgment (skill depth, relevant/same-role/leadership experience, project complexity, domain expertise).
+
+**Inputs:**
+- A single JD requirement (e.g. "5+ years in recommendation systems and clustering")
+- The full content of the mapped section(s) for this requirement (Section-Routed Evidence Retrieval — exact label match, not similarity-ranked)
+- A recruiter-defined rubric with explicit point scales (e.g. years used, project complexity, frameworks/tools, ownership level)
+- Decomposed sub-questions for the requirement
+
+**Outputs:**
+- Extracted evidence: a structured list of what's relevant from the mapped section(s) (e.g. "list every role where Python appears, with dates")
+- Sub-scores per sub-question on a 0.0–1.0 scale:
+  - Binary gates (e.g. "Does the candidate know Python?") → 0 or 1
+  - Linear measures (e.g. "years of experience / target years") → `min(candidate_years / ideal_years, 1.0)`
+  - Relevance measures (e.g. "project relevance to JD") → 0.0 to 1.0
+- Cited evidence for each sub-score (exact resume text)
+
+**Constraints:**
+- **The LLM must not see the requirement's weight** while scoring evidence against the rubric.
+- **The LLM must never compute the final weighted contribution** — weight application and aggregation are performed in code.
+- Score strictly against the recruiter-defined rubric — never against the LLM's own internal notion of "Advanced" or "Strong."
+- Extract evidence **before** scoring — this keeps the read systematic rather than holistic, and prevents the model from being influenced by content outside the mapped section.
+- Do not double-count overlapping experience (e.g. 6 years Python on cluster systems + 6 years managing recommendation projects ≠ 12 years).
+- If evidence is insufficient for a sub-question, return 0 for that sub-question — do not speculate.
+
+**Known Limitations:**
+- The LLM may struggle with ambiguous date ranges in resumes; `calculated_duration_months` is computed in code and provided to mitigate this.
+- Relevance scoring is inherently subjective; the rubric must define explicit anchors (0 = not relevant, 0.5 = partially relevant, 1.0 = exact match).
+
+**Version History:**
+- v0.1: Initial planned prompt specification per `WORKING_LOGIC.md` "Scoring Rubrics" and "Transforming the JD based requirements into sub-questions".
 
 ---
 
@@ -92,7 +133,7 @@ Each production prompt must include a prompt ID, purpose, inputs, outputs, const
 
 **Inputs:**
 - Recruiter question
-- Retrieved resume chunks
+- Top-K retrieved resume chunks (Document-Aware Chunking)
 - Candidate metadata allowed for display
 
 **Outputs:**
@@ -107,7 +148,56 @@ Each production prompt must include a prompt ID, purpose, inputs, outputs, const
 
 **Known Limitations:**
 - Retrieval failures may cause valid resume information to be unavailable to the prompt.
+- The LLM may paraphrase evidence; the underlying chunks remain the source of truth.
 
 **Version History:**
 - v0.1: Initial planned prompt specification.
+- v1.0: Adopted as the production prompt in `src/hireintel_ai/llm/service.py`.
+
+---
+
+## SCORE-EXPLAIN-001
+
+**Purpose:** Narrate a per-item score from the deterministic scorer using the candidate's retrieved evidence.
+
+**Inputs:**
+- The candidate's `ItemEvaluation` (item_name, importance, expected_years, raw_score, score, matched, section, snippet, reason).
+- The recruiter's question (e.g. "Why did this candidate receive 6/10 for Power BI?").
+
+**Outputs:**
+- A short paragraph that combines the scorer's reason with the cited snippet.
+- Citation of the matched profile section.
+
+**Constraints:**
+- The LLM must not change the score.
+- If the snippet does not actually support the score, return: "Evidence does not clearly support this score; please review manually."
+- Cite the section name (e.g. "experience", "skills").
+
+**Version History:**
+- v0.1: Adopted as the production prompt for per-item score explanations.
+
+---
+
+## CANDIDATE-COMPARE-001
+
+**Purpose:** Generate a recruiter-facing "Why A ranked above B" narrative from the deterministic comparison evidence.
+
+**Inputs:**
+- Candidate A's evaluation (per-item scores, sections, snippets).
+- Candidate B's evaluation (same).
+- Score delta and matched-item count delta.
+
+**Outputs:**
+- A 3-5 sentence narrative explaining the deterministic score difference.
+- Citations to the items that drove the delta.
+
+**Constraints:**
+- Never claim a candidate is "better" without pointing at the specific item that drove the score.
+- Never invent items that aren't in the evaluation payload.
+- If the score delta is < 1.0, say so and recommend reviewing the candidates' full profiles.
+
+**Version History:**
+- v0.1: Adopted as the production prompt in `scripts/compare_two.py`.
+
+---
 
