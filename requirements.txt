@@ -8,6 +8,8 @@ charset-normalizer==3.4.7
 click==8.4.1
 click-didyoumean==0.3.1
 click-plugins==1.1.1.2
+sentence-transformers==5.6.0
+streamlit
 click-repl==0.3.0
 colorama==0.4.6
 comm==0.2.3

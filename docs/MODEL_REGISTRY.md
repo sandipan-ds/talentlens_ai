@@ -12,7 +12,7 @@ All model changes must be documented here before implementation, and significant
 
 | Component | Current Selection | Status | Purpose |
 | --- | --- | --- | --- |
-| Active LLM | OpenRouter `minimax/minimax-m3` | **Active** | Resume chat, score explanation, candidate comparison, rubric-bound evidence scoring (`src/hireintel_ai/llm/service.py`) |
+| Active LLM | OpenRouter `minimax/minimax-m3` | **Active** | Candidate comparison narrative (`scripts/compare_two.py`); score explanation scaffold (`src/hireintel_ai/llm/service.py`). Resume chat and rubric-bound evidence scoring are **planned** but not yet implemented. |
 | Primary LLM (production upgrade) | GPT-4 | Proposed | Resume parsing support, JD extraction support, summaries, comparisons, explanations |
 | Fallback LLM (production upgrade) | Claude 3 | Proposed | Long-context fallback for large resumes and document-heavy comparison tasks |
 | Private / Local LLM | Llama 3 | Proposed | Privacy-first deployment option where candidate data cannot leave controlled infrastructure |

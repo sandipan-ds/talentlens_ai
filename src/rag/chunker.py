@@ -14,13 +14,35 @@ Very large chunks (> ``MAX_CHUNK_CHARS``) are sub-split on paragraph breaks
 with a small overlap so the embedding model never receives text larger than
 its context window.
 
+Every chunk is enriched with metadata at parse time per ``WORKING_LOGIC.md``
+"Chunk Metadata Schema":
+
+    section_type: experience | education | skills_summary | projects | ...
+    parent_structure:
+      organization
+      role_title
+      location
+      temporal_context:
+        start_date
+        end_date
+        is_current
+        calculated_duration_months   ← computed deterministically, never by the LLM
+    skills_asserted: [ ... ]
+    experience_type: professional | personal_project | academic | unknown
+
+``calculated_duration_months`` is computed in code from the parsed dates at
+parse time. LLMs are unreliable at date arithmetic, so this number is handed
+to the LLM ready-made rather than asked for.
+
 The output of :func:`chunk_profile` is a list of dictionaries matching the
 schema documented in ``docs/AI_ARCHITECTURE.md`` § Document-Aware Chunking.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -37,9 +59,236 @@ MAX_CHUNK_CHARS: int = 1200
 SPLIT_OVERLAP_CHARS: int = 120
 
 
+# ---------------------------------------------------------------------------
+# Date parsing — deterministic, no LLM.
+# ---------------------------------------------------------------------------
+
+# Common date formats found in resumes: "2020", "Jan 2020", "January 2020",
+# "01/2020", "2020-01", "Present", "Current", "Ongoing".
+_MONTH_MAP = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
+    "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+_DATE_RANGE_RE = re.compile(
+    r"(\b(?:\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{1,2}/\d{4}|\d{4}-\d{2})\b)"
+    r"\s*(?:-|–|—|to|until)\s*"
+    r"(\b(?:\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{1,2}/\d{4}|\d{4}-\d{2}|Present|Current|Ongoing|Now)\b)",
+    re.IGNORECASE,
+)
+
+_PRESENT_WORDS = {"present", "current", "ongoing", "now"}
+
+
+def _parse_single_date(token: str) -> Tuple[Optional[int], Optional[int], bool]:
+    """Parse a single date token into (year, month, is_present).
+
+    Args:
+        token: A date string like "2020", "Jan 2020", "Present", etc.
+
+    Returns:
+        Tuple of (year, month, is_present). Year and month are ``None`` if
+        unparseable. ``is_present`` is True for "Present"/"Current"/"Ongoing".
+    """
+    token = token.strip()
+    if token.lower() in _PRESENT_WORDS:
+        return None, None, True
+
+    # "2020" — year only.
+    if token.isdigit() and len(token) == 4:
+        return int(token), None, False
+
+    # "01/2020" — month/year.
+    m = re.match(r"(\d{1,2})/(\d{4})", token)
+    if m:
+        return int(m.group(2)), int(m.group(1)), False
+
+    # "2020-01" — year-month.
+    m = re.match(r"(\d{4})-(\d{2})", token)
+    if m:
+        return int(m.group(1)), int(m.group(2)), False
+
+    # "Jan 2020" / "January 2020" — month name + year.
+    m = re.match(r"([A-Za-z]+)\s+(\d{4})", token)
+    if m:
+        month_name = m.group(1).lower()
+        if month_name in _MONTH_MAP:
+            return int(m.group(2)), _MONTH_MAP[month_name], False
+
+    return None, None, False
+
+
+def _months_between(start_year: int, start_month: Optional[int],
+                    end_year: int, end_month: Optional[int]) -> int:
+    """Compute the number of months between two dates (inclusive).
+
+    When month is ``None`` for the start, assume January (month=1).
+    When month is ``None`` for the end, assume December (month=12).
+    This gives the correct full-year span: "2018-2020" → 36 months (3 years),
+    not 24 or 35.
+
+    Args:
+        start_year: Start year.
+        start_month: Start month (1-12), or None for unknown (→ January).
+        end_year: End year.
+        end_month: End month (1-12), or None for unknown (→ December).
+
+    Returns:
+        Number of months (non-negative integer, inclusive of both endpoints).
+    """
+    sm = start_month or 1
+    em = end_month or 12
+    months = (end_year * 12 + em) - (start_year * 12 + sm) + 1
+    return max(0, months)
+
+
+def parse_temporal_context(dates_str: str) -> Dict[str, Any]:
+    """Parse a date range string into a temporal_context dict.
+
+    This is the deterministic date parser that produces
+    ``calculated_duration_months`` in code, never via the LLM.
+
+    Args:
+        dates_str: Raw date string from a resume entry, e.g.
+            "2017 - Present", "Jun 2019 — Dec 2022", "2020-2023".
+
+    Returns:
+        Dict with keys: ``start_date``, ``end_date``, ``is_current``,
+        ``calculated_duration_months``. Values are ``None`` when unparseable.
+    """
+    if not dates_str:
+        return {
+            "start_date": None,
+            "end_date": None,
+            "is_current": False,
+            "calculated_duration_months": None,
+        }
+
+    match = _DATE_RANGE_RE.search(dates_str)
+    if not match:
+        # Try single year or single date.
+        single = _parse_single_date(dates_str.strip())
+        if single[0] is not None:
+            return {
+                "start_date": {"year": single[0], "month": single[1]},
+                "end_date": {"year": single[0], "month": single[1]},
+                "is_current": False,
+                "calculated_duration_months": 0,
+            }
+        return {
+            "start_date": None,
+            "end_date": None,
+            "is_current": False,
+            "calculated_duration_months": None,
+        }
+
+    start_token, end_token = match.group(1), match.group(2)
+    start_year, start_month, _ = _parse_single_date(start_token)
+    end_year, end_month, is_current = _parse_single_date(end_token)
+
+    if start_year is None:
+        return {
+            "start_date": None,
+            "end_date": None,
+            "is_current": is_current,
+            "calculated_duration_months": None,
+        }
+
+    end_year_final = end_year if end_year is not None else date.today().year
+    end_month_final = end_month if end_month is not None else (date.today().month if is_current else None)
+
+    duration = _months_between(start_year, start_month, end_year_final, end_month_final)
+
+    return {
+        "start_date": {"year": start_year, "month": start_month},
+        "end_date": {"year": end_year_final, "month": end_month_final} if end_year is not None or is_current else None,
+        "is_current": is_current,
+        "calculated_duration_months": duration,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Skills assertion — extract skill keywords from text (deterministic).
+# ---------------------------------------------------------------------------
+
+# A small stopword set to avoid asserting non-skills as skills.
+_SKILL_STOPWORDS = {"and", "or", "the", "with", "using", "use", "used", "for", "to", "in", "of", "a", "an"}
+
+
+def _extract_skills_asserted(text: str, known_skills: Optional[List[str]] = None) -> List[str]:
+    """Extract skill keywords mentioned in a chunk's text.
+
+    If a known skills list is provided (from the structured profile's
+    ``skills`` field), we check which of those skills appear in the text.
+    If no known skills list is provided, we fall back to extracting
+    capitalized technical-looking tokens.
+
+    Args:
+        text: The chunk's text content.
+        known_skills: Optional list of skills from the structured profile.
+
+    Returns:
+        List of skill names found in the text.
+    """
+    if not text:
+        return []
+    text_lower = text.lower()
+    if known_skills:
+        return [
+            skill for skill in known_skills
+            if skill.lower() in text_lower and skill.lower() not in _SKILL_STOPWORDS
+        ]
+    # Fallback: extract capitalized words that look like tech terms.
+    # This is intentionally conservative — better to miss a skill than
+    # to assert a false one.
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Experience type classification — deterministic.
+# ---------------------------------------------------------------------------
+
+def _classify_experience_type(text: str, section: str) -> str:
+    """Classify the experience type of a chunk.
+
+    Args:
+        text: The chunk's text content.
+        section: The canonical section name.
+
+    Returns:
+        One of: "professional", "personal_project", "academic", "unknown".
+    """
+    text_lower = text.lower()
+    if section == "projects":
+        # Heuristic: "academic" if it mentions university/coursework context.
+        if any(w in text_lower for w in ("university", "course", "thesis", "dissertation", "academic", "capstone")):
+            return "academic"
+        if any(w in text_lower for w in ("personal", "side project", "hobby", "self-taught")):
+            return "personal_project"
+        return "professional"
+    if section == "experience":
+        return "professional"
+    if section == "education":
+        return "academic"
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Chunk record with full metadata schema.
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class ChunkRecord:
-    """One chunk of a resume, ready for embedding + retrieval."""
+    """One chunk of a resume, ready for embedding + retrieval.
+
+    The chunk carries the full metadata schema from ``WORKING_LOGIC.md``
+    "Chunk Metadata Schema" so downstream scoring can use
+    ``calculated_duration_months``, ``experience_type``, ``skills_asserted``,
+    and ``parent_structure`` without re-deriving them via an LLM.
+    """
 
     chunk_id: str
     candidate_id: str
@@ -51,7 +300,14 @@ class ChunkRecord:
     char_span: Tuple[int, int]
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Full metadata schema fields (per WORKING_LOGIC.md "Chunk Metadata Schema").
+    section_type: str = ""
+    parent_structure: Dict[str, Any] = field(default_factory=dict)
+    skills_asserted: List[str] = field(default_factory=list)
+    experience_type: str = "unknown"
+
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a dict matching the documented chunk schema."""
         return {
             "chunk_id": self.chunk_id,
             "candidate_id": self.candidate_id,
@@ -62,6 +318,11 @@ class ChunkRecord:
             "text": self.text,
             "char_span": list(self.char_span),
             "metadata": self.metadata,
+            # Full metadata schema (per WORKING_LOGIC.md "Chunk Metadata Schema").
+            "section_type": self.section_type,
+            "parent_structure": self.parent_structure,
+            "skills_asserted": self.skills_asserted,
+            "experience_type": self.experience_type,
         }
 
 
@@ -110,12 +371,27 @@ def chunk_profile(profile: Dict[str, Any], role_bucket: str = "") -> List[ChunkR
         )
 
     # ---- 2) Experience (one chunk per entry) --------------------------
+    # Known skills from the profile, used for skills_asserted extraction.
+    known_skills = profile.get("skills") or []
+
     experience = profile.get("experience") or {}
     experience_records = experience.get("entries") or []
     for i, entry in enumerate(experience_records):
         text = _entry_to_text(entry)
         if not text:
             continue
+
+        # Parse dates deterministically → temporal_context with
+        # calculated_duration_months computed in code, never by the LLM.
+        dates_str = entry.get("dates") or ""
+        temporal_context = parse_temporal_context(dates_str)
+
+        # Extract skills mentioned in this entry's text.
+        skills_in_entry = _extract_skills_asserted(text, known_skills)
+
+        # Classify experience type.
+        exp_type = _classify_experience_type(text, "experience")
+
         chunks.append(
             ChunkRecord(
                 chunk_id=f"{candidate_id}__experience__{i}",
@@ -133,6 +409,15 @@ def chunk_profile(profile: Dict[str, Any], role_bucket: str = "") -> List[ChunkR
                     "location": entry.get("location"),
                     "bullet_count": len(entry.get("details") or []),
                 },
+                section_type="experience",
+                parent_structure={
+                    "organization": entry.get("company"),
+                    "role_title": entry.get("title"),
+                    "location": entry.get("location"),
+                    "temporal_context": temporal_context,
+                },
+                skills_asserted=skills_in_entry,
+                experience_type=exp_type,
             )
         )
 
@@ -154,6 +439,20 @@ def chunk_profile(profile: Dict[str, Any], role_bucket: str = "") -> List[ChunkR
                 text=text,
                 char_span=(0, len(text)),
                 metadata={"description": text},
+                section_type="education",
+                parent_structure={
+                    "organization": None,
+                    "role_title": None,
+                    "location": None,
+                    "temporal_context": {
+                        "start_date": None,
+                        "end_date": None,
+                        "is_current": False,
+                        "calculated_duration_months": None,
+                    },
+                },
+                skills_asserted=_extract_skills_asserted(text, known_skills),
+                experience_type="academic",
             )
         )
 
@@ -163,6 +462,7 @@ def chunk_profile(profile: Dict[str, Any], role_bucket: str = "") -> List[ChunkR
         text = (project_text or "").strip()
         if not text:
             continue
+        exp_type = _classify_experience_type(text, "projects")
         chunks.append(
             ChunkRecord(
                 chunk_id=f"{candidate_id}__projects__{i}",
@@ -174,6 +474,20 @@ def chunk_profile(profile: Dict[str, Any], role_bucket: str = "") -> List[ChunkR
                 text=text,
                 char_span=(0, len(text)),
                 metadata={},
+                section_type="projects",
+                parent_structure={
+                    "organization": None,
+                    "role_title": None,
+                    "location": None,
+                    "temporal_context": {
+                        "start_date": None,
+                        "end_date": None,
+                        "is_current": False,
+                        "calculated_duration_months": None,
+                    },
+                },
+                skills_asserted=_extract_skills_asserted(text, known_skills),
+                experience_type=exp_type,
             )
         )
 

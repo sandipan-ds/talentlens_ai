@@ -780,14 +780,15 @@ Experience sub-score = min(calculated sub-score, 1.0) = min(1.67, 1) = 1
 The platform maintains a recruiter-editable tier database for institutions and certification providers.
 
 ```text
-Tier A           → 100% of allotted points
-Tier B           → 80%
-Tier C           → 60%
-Tier D           → 40%
-Not Listed / None → 0%
+Tier 1            → 100% of allotted points (1.0)
+Tier 2            → 75%  of allotted points (0.75)
+Tier 3            → 50%  of allotted points (0.50)
+Not Listed        → 50%  of allotted points (0.50)
 ```
 
 Institute and certification weight remain fully recruiter-controlled — a recruiter may set Education Weight = 2 for one role and Education Weight = 20 for another. The platform must never assume institute prestige is universally important; see **Quality-Based Evaluation** below.
+
+The tier databases are stored as recruiter-editable JSON files at `data/Institutes/institute_tiers.json` and `data/Certificates/certificate_tiers.json`. An institute or certification not found in any tier gets 0.50 (same as Tier 3) unless evidence places it in Tier 1 or Tier 2. The degree/cert match itself is scored separately.
 
 # Objective Candidate Evaluation
 

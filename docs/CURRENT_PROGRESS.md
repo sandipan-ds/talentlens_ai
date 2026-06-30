@@ -34,7 +34,7 @@ left" when planning the next session.
 | Red items block scoring until clarified | Hard gate | ⬜ | — |
 | Degree equivalence table per role | Confirm acceptable alternatives | ⬜ | — |
 | Per-skill expected years (ask when missing) | "Expected Tableau experience?" | ⬜ | — |
-| Recruiter weight assignment 0–10 | Done via form | ✅ | `src/ui/recruiter_weight_config.py`, `src/ui/business_analyst_weight_form.py` |
+| Recruiter weight assignment 0–10 | Done via form | ✅ | `src/ui/recruiter_weight_config.py` |
 | Weight normalization to 100 | `scale_factor = 100 / max_score` | ✅ | `src/scoring/graded_scorer.py` |
 
 ---
@@ -79,7 +79,7 @@ left" when planning the next session.
 | Total normalized to 100 | `total_raw × scale_factor` | ✅ | `graded_scorer.evaluate_candidate` |
 | Per-item evidence (section, snippet, years, reason) | Mandatory | ✅ | `ItemEvaluation` dataclass |
 | Cached rubric reasoning for score explanation | Store sub-scores + cited evidence at scoring time | ⬜ | Not yet implemented |
-| Score Explanation Using RAG | Retrieve → ground → narrate | 🟡 | Pipeline scaffolded in `hireintel_ai/llm/service.py`; UI not yet built |
+| Score Explanation Using RAG | Retrieve → ground → narrate | ⬜ | LLM service scaffolded (`hireintel_ai/llm/service.py`) but only candidate-comparison narrative exists; no per-item score explanation method implemented |
 
 ---
 
@@ -99,9 +99,9 @@ left" when planning the next session.
 | Step | Status |
 |---|---|
 | Document-Aware Chunking for retrieval | ✅ |
-| RAG-grounded answers | 🟡 (LLM service + chunks exist; `scripts/resume_chat.py` CLI not built) |
-| Strict grounding prompt (no hallucination) | ✅ |
-| "Information not found in candidate documents." fallback | ✅ |
+| RAG-grounded answers | ⬜ (LLM service scaffolded; no resume-chat method implemented; `scripts/resume_chat.py` CLI not built) |
+| Strict grounding prompt (no hallucination) | ⬜ (prompt spec exists in `PROMPT_LIBRARY.md` RESUME-CHAT-001; not implemented in code) |
+| "Information not found in candidate documents." fallback | ⬜ (string appears only in docs; not in any `.py` file) |
 
 ---
 
@@ -110,8 +110,8 @@ left" when planning the next session.
 | Step | Status | Where |
 |---|---|---|
 | Side-by-side comparison | ✅ | `scripts/compare_two.py` |
-| Evidence-backed "Why A above B" | ✅ | Deterministic + LLM (if configured) |
-| LLM explanation grounded in retrieved content | ✅ | `LlmService.explain_candidate_score` |
+| Evidence-backed "Why A above B" | ✅ | Deterministic score deltas + component breakdown |
+| LLM explanation grounded in retrieved content | 🟡 | `LlmService.explain_candidate_score` generates a comparison narrative when LLM is configured; not grounded in retrieved resume content (uses scorer output, not RAG) |
 
 ---
 

@@ -21,7 +21,7 @@ Each production prompt must include a prompt ID, purpose, inputs, outputs, const
 | RUBRIC-SCORE-001 | Score candidate evidence against a recruiter-defined rubric | Planned |
 | CANDIDATE-SUMMARY-001 | Generate an evidence-based recruiter summary | Planned |
 | CANDIDATE-COMPARE-001 | Compare candidates using structured evidence | Active (used by `scripts/compare_two.py` when LLM is configured) |
-| RESUME-CHAT-001 | Answer recruiter questions using retrieved resume chunks | Active (`hireintel_ai/llm/service.py`) |
+| RESUME-CHAT-001 | Answer recruiter questions using retrieved resume chunks | Planned (LLM service scaffolded; no chat method or strict-grounding fallback implemented yet) |
 | SCORE-EXPLAIN-001 | Narrate a per-item score using retrieved evidence + scorer output | Active (used by score-explanation flow) |
 | HIRING-RECOMMENDATION-001 | Generate evidence-backed hiring recommendation text | Planned |
 
@@ -152,7 +152,7 @@ Each production prompt must include a prompt ID, purpose, inputs, outputs, const
 
 **Version History:**
 - v0.1: Initial planned prompt specification.
-- v1.0: Adopted as the production prompt in `src/hireintel_ai/llm/service.py`.
+- v0.2: Reverted to Planned — `src/hireintel_ai/llm/service.py` does not yet implement a chat method or the strict-grounding fallback string.
 
 ---
 
